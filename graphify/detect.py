@@ -444,63 +444,123 @@ def detect(root: Path, *, follow_symlinks: bool = False) -> dict:
     }
 
 
-def load_manifest(manifest_path: str = _MANIFEST_PATH) -> dict[str, float]:
-    """Load the file modification time manifest from a previous run."""
+def _manifest_key(path: Path, root: Path) -> str:
+    """Return a stable manifest key relative to root when possible."""
     try:
-        return json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        return str(path.resolve().relative_to(root.resolve())).replace(os.sep, "/")
+    except ValueError:
+        return str(path.resolve())
+
+
+def load_manifest(manifest_path: str = _MANIFEST_PATH) -> dict[str, dict]:
+    """Load a manifest, normalizing legacy mtime-only payloads."""
+    try:
+        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     except Exception:
         return {}
 
+    if isinstance(payload, dict) and "files" in payload:
+        files = payload.get("files", {})
+        return files if isinstance(files, dict) else {}
 
-def save_manifest(files: dict[str, list[str]], manifest_path: str = _MANIFEST_PATH) -> None:
-    """Save current file mtimes so the next --update run can diff against them."""
-    manifest: dict[str, float] = {}
-    for file_list in files.values():
+    if isinstance(payload, dict):
+        legacy: dict[str, dict] = {}
+        for key, value in payload.items():
+            if isinstance(value, (int, float)):
+                legacy[key] = {"mtime": float(value), "size": 0, "hash": "", "file_type": ""}
+        return legacy
+    return {}
+
+
+def save_manifest(
+    files: dict[str, list[str]],
+    manifest_path: str = _MANIFEST_PATH,
+    *,
+    root: Path | None = None,
+) -> None:
+    """Save a rich manifest for incremental detection."""
+    from graphify.cache import file_hash
+
+    manifest: dict[str, dict] = {}
+    relative_root = (root or Path(".")).resolve()
+    for ftype, file_list in files.items():
         for f in file_list:
+            path = Path(f)
             try:
-                manifest[f] = Path(f).stat().st_mtime
+                stat = path.stat()
             except OSError:
-                pass  # file deleted between detect() and manifest write - skip it
+                continue
+            manifest[_manifest_key(path, relative_root)] = {
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "hash": file_hash(path, relative_root),
+                "file_type": ftype,
+            }
     Path(manifest_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    payload = {"version": 2, "files": manifest}
+    Path(manifest_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def detect_incremental(root: Path, manifest_path: str = _MANIFEST_PATH) -> dict:
-    """Like detect(), but returns only new or modified files since the last run.
+def detect_incremental(
+    root: Path,
+    manifest_path: str = _MANIFEST_PATH,
+    *,
+    candidate_paths: set[str] | None = None,
+    relative_root: Path | None = None,
+) -> dict:
+    """Like detect(), but returns only new or modified files since the last run."""
+    from graphify.cache import file_hash
 
-    Compares current file mtimes against the stored manifest.
-    Use for --update mode: re-extract only what changed, merge into existing graph.
-    """
     full = detect(root)
     manifest = load_manifest(manifest_path)
+    rel_root = (relative_root or root).resolve()
 
     if not manifest:
-        # No previous run - treat everything as new
         full["incremental"] = True
         full["new_files"] = full["files"]
         full["unchanged_files"] = {k: [] for k in full["files"]}
         full["new_total"] = full["total_files"]
+        full["deleted_files"] = []
         return full
+
+    normalized_candidates = None
+    if candidate_paths is not None:
+        normalized_candidates = {str(Path(path)).replace(os.sep, "/") for path in candidate_paths}
 
     new_files: dict[str, list[str]] = {k: [] for k in full["files"]}
     unchanged_files: dict[str, list[str]] = {k: [] for k in full["files"]}
+    current_keys: set[str] = set()
 
     for ftype, file_list in full["files"].items():
         for f in file_list:
-            stored_mtime = manifest.get(f)
+            path = Path(f)
+            key = _manifest_key(path, rel_root)
+            current_keys.add(key)
+            previous = manifest.get(key)
             try:
-                current_mtime = Path(f).stat().st_mtime
-            except Exception:
-                current_mtime = 0
-            if stored_mtime is None or current_mtime > stored_mtime:
+                stat = path.stat()
+            except OSError:
+                new_files[ftype].append(f)
+                continue
+
+            should_hash = previous is None
+            if not should_hash and normalized_candidates is not None and key in normalized_candidates:
+                should_hash = True
+            if not should_hash and previous:
+                if previous.get("mtime") != stat.st_mtime or previous.get("size") != stat.st_size:
+                    should_hash = True
+
+            if not should_hash:
+                unchanged_files[ftype].append(f)
+                continue
+
+            current_hash = file_hash(path, rel_root)
+            if previous is None or previous.get("hash") != current_hash or previous.get("file_type") != ftype:
                 new_files[ftype].append(f)
             else:
                 unchanged_files[ftype].append(f)
 
-    # Files in manifest that no longer exist - their cached nodes are now ghost nodes
-    current_files = {f for flist in full["files"].values() for f in flist}
-    deleted_files = [f for f in manifest if f not in current_files]
-
+    deleted_files = [path for path in manifest if path not in current_keys]
     new_total = sum(len(v) for v in new_files.values())
     full["incremental"] = True
     full["new_files"] = new_files

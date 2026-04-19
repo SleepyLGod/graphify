@@ -906,8 +906,23 @@ def main() -> None:
         print("    --author \"Name\"         tag the author of the content")
         print("    --contributor \"Name\"    tag who added it to the corpus")
         print("    --dir <path>            target directory (default: ./raw)")
+        print("  init-kb <path>          create a local graphify knowledge-base directory")
+        print("    --git                   initialize the KB root as a git repository")
+        print("  build <path>            build graph outputs for a knowledge base or corpus")
+        print("    --model NAME            override the Codex model")
+        print("    --no-wiki              skip wiki export")
+        print("    --no-html              skip HTML export")
         print("  watch <path>            watch a folder and rebuild the graph on code changes")
-        print("  update <path>           re-extract code files and update the graph (no LLM needed)")
+        print("  update <path>           incrementally update a graphify knowledge base")
+        print("    --model NAME            override the Codex model")
+        print("    --no-wiki              skip wiki export")
+        print("    --no-html              skip HTML export")
+        print("  sync push <path>        push KB data to a configured rclone remote")
+        print("  sync pull <path>        pull KB data from a configured rclone remote")
+        print("  sync status <path>      show sync configuration and the last sync state")
+        print("    --scope S              sync scope: raw|wiki|out|config|all")
+        print("    --remote R             override kb.sync_remote")
+        print("    --dry-run              pass --dry-run to rclone sync")
         print("  cluster-only <path>     rerun clustering on an existing graph.json and regenerate report")
         print("  query \"<question>\"       BFS traversal of graph.json for a question")
         print("    --dfs                   use depth-first instead of breadth-first")
@@ -1271,6 +1286,135 @@ def main() -> None:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif cmd == "init-kb":
+        if len(sys.argv) < 3:
+            print("Usage: graphify init-kb <path> [--git]", file=sys.stderr)
+            sys.exit(1)
+        kb_root = Path(sys.argv[2])
+        init_git = "--git" in sys.argv[3:]
+        from graphify.kb import init_kb
+        paths = init_kb(kb_root, init_git=init_git)
+        print(f"Initialized knowledge base at {paths.root}")
+        print(f"  corpus: {paths.corpus}")
+        print(f"  output: {paths.out}")
+        print(f"  config: {paths.config_file}")
+
+    elif cmd == "build":
+        if len(sys.argv) < 3:
+            print("Usage: graphify build <path> [--model NAME] [--no-wiki] [--no-html]", file=sys.stderr)
+            sys.exit(1)
+        kb_root = Path(sys.argv[2])
+        provider = None
+        model = None
+        include_wiki = "--no-wiki" not in sys.argv[3:]
+        include_html = "--no-html" not in sys.argv[3:]
+        args = sys.argv[3:]
+        i = 0
+        while i < len(args):
+            if args[i] == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+                i += 2
+            elif args[i].startswith("--provider="):
+                provider = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--model" and i + 1 < len(args):
+                model = args[i + 1]
+                i += 2
+            elif args[i].startswith("--model="):
+                model = args[i].split("=", 1)[1]
+                i += 1
+            else:
+                i += 1
+        from graphify.kb import KBError, build_kb
+        try:
+            summary = build_kb(
+                kb_root,
+                provider_name=provider,
+                model=model,
+                update=False,
+                include_wiki=include_wiki,
+                include_html=include_html,
+            )
+        except KBError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Graph complete for {summary.kb_root}.")
+        print()
+        html_output = summary.html_path if summary.html_path.exists() else "disabled"
+        wiki_output = summary.wiki_index_path if summary.wiki_index_path else "disabled"
+        print(
+            f"Outputs are in graphify-out: {html_output}, {summary.report_path}, "
+            f"{summary.graph_path}, and the wiki entrypoint at "
+            f"{wiki_output}."
+        )
+        print(
+            f"This run produced {summary.total_nodes} nodes, {summary.total_edges} edges, "
+            f"and {summary.total_communities} communities."
+        )
+        if summary.semantic_stats_available:
+            print(
+                f"Semantic extraction: {summary.semantic_files_extracted} file(s) processed, "
+                f"{summary.semantic_cache_hits} cache hit(s)."
+            )
+        if summary.usage_available:
+            cached = (
+                f", {summary.cached_input_tokens} cached input"
+                if summary.cached_input_tokens
+                else ""
+            )
+            print(
+                f"Latest run tokens: {summary.input_tokens} input, "
+                f"{summary.output_tokens} output{cached}."
+            )
+        else:
+            print("Latest run tokens: unavailable.")
+
+    elif cmd == "sync":
+        if len(sys.argv) < 4:
+            print(
+                "Usage: graphify sync [push|pull|status] <path> [--scope S] [--remote R] [--dry-run]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        action = sys.argv[2]
+        kb_root = Path(sys.argv[3])
+        scope = "all"
+        remote = None
+        dry_run = "--dry-run" in sys.argv[4:]
+        args = sys.argv[4:]
+        i = 0
+        while i < len(args):
+            if args[i] == "--scope" and i + 1 < len(args):
+                scope = args[i + 1]
+                i += 2
+            elif args[i].startswith("--scope="):
+                scope = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--remote" and i + 1 < len(args):
+                remote = args[i + 1]
+                i += 2
+            elif args[i].startswith("--remote="):
+                remote = args[i].split("=", 1)[1]
+                i += 1
+            else:
+                i += 1
+        from graphify.sync import SyncError, sync_pull, sync_push, sync_status
+        try:
+            if action == "push":
+                state = sync_push(kb_root, scope=scope, remote=remote, dry_run=dry_run)
+                print(f"Sync push complete: {json.dumps(state, indent=2)}")
+            elif action == "pull":
+                state = sync_pull(kb_root, scope=scope, remote=remote, dry_run=dry_run)
+                print(f"Sync pull complete: {json.dumps(state, indent=2)}")
+            elif action == "status":
+                state = sync_status(kb_root)
+                print(json.dumps(state, indent=2))
+            else:
+                raise SyncError(f"Unknown sync action: {action}")
+        except SyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     elif cmd == "watch":
         watch_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
         if not watch_path.exists():
@@ -1319,14 +1463,53 @@ def main() -> None:
         if not watch_path.exists():
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
-        from graphify.watch import _rebuild_code
-        print(f"Re-extracting code files in {watch_path} (no LLM needed)...")
-        ok = _rebuild_code(watch_path)
-        if ok:
-            print("Code graph updated. For doc/paper/image changes run /graphify --update in your AI assistant.")
-        else:
-            print("Nothing to update or rebuild failed — check output above.", file=sys.stderr)
+        provider = None
+        model = None
+        include_wiki = "--no-wiki" not in sys.argv[3:]
+        include_html = "--no-html" not in sys.argv[3:]
+        args = sys.argv[3:]
+        i = 0
+        while i < len(args):
+            if args[i] == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+                i += 2
+            elif args[i].startswith("--provider="):
+                provider = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--model" and i + 1 < len(args):
+                model = args[i + 1]
+                i += 2
+            elif args[i].startswith("--model="):
+                model = args[i].split("=", 1)[1]
+                i += 1
+            else:
+                i += 1
+        from graphify.kb import KBError, build_kb
+        try:
+            summary = build_kb(
+                watch_path,
+                provider_name=provider,
+                model=model,
+                update=True,
+                include_wiki=include_wiki,
+                include_html=include_html,
+            )
+        except KBError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
+        print(
+            f"Updated {summary.kb_root}: {summary.total_nodes} nodes, {summary.total_edges} edges, "
+            f"{summary.total_communities} communities."
+        )
+        token_summary = "unavailable"
+        if summary.usage_available:
+            token_summary = f"{summary.input_tokens} input / {summary.output_tokens} output"
+            if summary.cached_input_tokens:
+                token_summary += f" / {summary.cached_input_tokens} cached input"
+        print(
+            f"Changed files: {summary.changed_files}, deleted: {summary.deleted_files}, "
+            f"latest run tokens: {token_summary}."
+        )
 
     elif cmd == "benchmark":
         from graphify.benchmark import run_benchmark, print_benchmark

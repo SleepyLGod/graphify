@@ -22,3 +22,11 @@ docs/superpowers/
 .vscode/
 openspec/
 uv.lock
+/worked/.DS_Store
+.DS_Store
+.codex/
+.opencode/
+opencode.json
+playground/
+tools/graphify_codex.sh
+docs/local-ai-wiki-plan.md
