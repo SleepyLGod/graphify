@@ -38,6 +38,8 @@ dist/
 
 Same syntax as `.gitignore`. You can keep a single `.graphifyignore` at your repo root — patterns work correctly even when graphify is run on a subfolder.
 
+For the local knowledge-base CLI flow (`init-kb`, `build`, `update`, `sync`), see [docs/local-kb-workflow.md](docs/local-kb-workflow.md).
+
 ## How it works
 
 graphify runs in three passes. First, a deterministic AST pass extracts structure from code files (classes, functions, imports, call graphs, docstrings, rationale comments) with no LLM needed. Second, video and audio files are transcribed locally with faster-whisper using a domain-aware prompt derived from corpus god nodes — transcripts are cached so re-runs are instant. Third, Claude subagents run in parallel over docs, papers, images, and transcripts to extract concepts, relationships, and design rationale. The results are merged into a NetworkX graph, clustered with Leiden community detection, and exported as interactive HTML, queryable JSON, and a plain-language audit report.
