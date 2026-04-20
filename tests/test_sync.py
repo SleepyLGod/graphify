@@ -57,6 +57,18 @@ def test_included_relative_files_respects_gitignore(tmp_path):
     assert files == ["notes.md"]
 
 
+def test_included_relative_files_excludes_git_metadata(tmp_path):
+    paths = init_kb(tmp_path / "ai-wiki")
+    subprocess.run(["git", "init", str(paths.root)], check=True, capture_output=True, text=True)
+    (paths.root / ".git" / "scratch").write_text("junk", encoding="utf-8")
+    (paths.root / "raw" / "notes.md").write_text("notes", encoding="utf-8")
+
+    files = _included_relative_files(paths.root, paths.root, "all")
+
+    assert "raw/notes.md" in files
+    assert ".git/scratch" not in files
+
+
 def test_included_relative_files_respects_graphifyignore_under_raw(tmp_path):
     paths = init_kb(tmp_path / "ai-wiki")
     nested_out = paths.root / "raw" / "graphify-out"

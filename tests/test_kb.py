@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from graphify.detect import detect_incremental, save_manifest
+from graphify.detect import _manifest_key, detect_incremental, save_manifest
 from graphify.kb import _parse_codex_usage, build_kb, init_kb, load_config
 
 
@@ -111,6 +111,24 @@ def test_load_manifest_legacy_payload(tmp_path):
     manifest.write_text(json.dumps({"raw/note.md": 123.0}), encoding="utf-8")
     loaded = load_manifest(str(manifest))
     assert loaded["raw/note.md"]["mtime"] == 123.0
+
+
+def test_manifest_key_normalizes_fallback_separators(tmp_path, monkeypatch):
+    path = tmp_path / "note.md"
+    path.write_text("note", encoding="utf-8")
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, *args, **kwargs):
+        if self == path:
+            return Path(r"C:\tmp\note.md")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr("graphify.detect.Path.resolve", fake_resolve)
+    monkeypatch.setattr("graphify.detect.os.sep", "\\")
+    key = _manifest_key(path, tmp_path / "elsewhere")
+
+    assert "\\" not in key
 
 
 def test_build_kb_delegates_to_codex_skill_and_generates_wiki(tmp_path, monkeypatch):

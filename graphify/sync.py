@@ -162,9 +162,20 @@ def _remove_empty_dirs(root: Path) -> None:
 
 def _should_ignore(kb_root: Path, path: Path, scope: str, *, git_ignored: set[str]) -> bool:
     """Return True when a path should be excluded from sync for the requested scope."""
+    if _is_always_excluded(kb_root, path):
+        return True
     if _relative_git_path(kb_root, path) in git_ignored:
         return True
     return _is_graphify_ignored(kb_root, path, scope)
+
+
+def _is_always_excluded(kb_root: Path, path: Path) -> bool:
+    """Return True for files that should never participate in KB sync."""
+    try:
+        rel_path = path.relative_to(kb_root)
+    except ValueError:
+        return False
+    return ".git" in rel_path.parts
 
 
 def _relative_git_path(kb_root: Path, path: Path) -> str | None:

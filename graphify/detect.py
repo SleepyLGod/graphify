@@ -449,7 +449,7 @@ def _manifest_key(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve())).replace(os.sep, "/")
     except ValueError:
-        return str(path.resolve())
+        return str(path.resolve()).replace(os.sep, "/")
 
 
 def load_manifest(manifest_path: str = _MANIFEST_PATH) -> dict[str, dict]:

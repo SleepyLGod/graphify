@@ -491,9 +491,14 @@ def _count_manifest_files(manifest_path: Path) -> int:
     return 0
 
 
-def _normalize_source_files(payload: dict[str, Any], *, kb_root: Path) -> dict[str, Any]:
+def _normalize_source_files(
+    payload: dict[str, Any],
+    *,
+    kb_root: Path,
+    office_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Rewrite absolute `source_file` paths relative to the KB root when possible."""
-    office_map = _office_sidecar_map(kb_root)
+    office_map = office_map or _office_sidecar_map(kb_root)
     for node in payload.get("nodes", []):
         source_file = node.get("source_file")
         if source_file:
@@ -557,7 +562,7 @@ def _normalize_office_provenance(paths: KBPaths, *, include_html: bool) -> None:
     graph_path = paths.out / "graph.json"
     if graph_path.exists():
         graph_payload = json.loads(graph_path.read_text(encoding="utf-8"))
-        normalized_graph = _normalize_source_files(graph_payload, kb_root=paths.root)
+        normalized_graph = _normalize_source_files(graph_payload, kb_root=paths.root, office_map=office_map)
         graph_path.write_text(json.dumps(normalized_graph, indent=2), encoding="utf-8")
 
     _rewrite_text_provenance(paths.out / "GRAPH_REPORT.md", office_map)
