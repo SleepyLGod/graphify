@@ -10,22 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from graphify.analyze import god_nodes, surprising_connections, suggest_questions
-from graphify.build import build, build_from_json
-from graphify.cache import check_semantic_cache, save_semantic_cache
-from graphify.cluster import cluster, score_all
-from graphify.detect import (
-    IMAGE_EXTENSIONS,
-    OFFICE_EXTENSIONS,
-    VIDEO_EXTENSIONS,
-    detect,
-    detect_incremental,
-    save_manifest,
-)
-from graphify.export import to_html, to_json
-from graphify.extract import extract
-from graphify.report import generate
-from graphify.transcribe import build_whisper_prompt, transcribe_all
+from graphify.analyze import god_nodes
+from graphify.build import build_from_json
+from graphify.cluster import score_all
+from graphify.detect import OFFICE_EXTENSIONS, detect_incremental
 from graphify.wiki import to_wiki
 
 
@@ -101,11 +89,20 @@ def load_config(root: Path | str) -> dict[str, Any]:
     if not paths.config_file.exists():
         return config
 
-    import tomllib
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover - exercised only on Python 3.10
+        import tomli as tomllib
 
     loaded = tomllib.loads(paths.config_file.read_text(encoding="utf-8"))
     config["kb"].update(loaded.get("kb", {}))
     return config
+
+
+def is_kb_root(root: Path | str) -> bool:
+    """Return True when the path looks like a graphify knowledge-base root."""
+    paths = resolve_paths(root)
+    return paths.config_file.exists() and (paths.root / "raw").exists()
 
 
 def init_kb(root: Path | str, *, init_git: bool = False) -> KBPaths:
@@ -146,7 +143,6 @@ def init_kb(root: Path | str, *, init_git: bool = False) -> KBPaths:
 def build_kb(
     root: Path | str,
     *,
-    provider_name: str | None = None,
     model: str | None = None,
     update: bool = False,
     include_wiki: bool = True,
@@ -158,10 +154,12 @@ def build_kb(
         raise KBError(f"Corpus path not found: {paths.corpus}")
 
     config = load_config(paths.root)
-    provider = provider_name or config["kb"].get("provider") or "codex_skill"
+    provider = config["kb"].get("provider") or "codex_skill"
     provider_model = model or (config["kb"].get("model") or None)
-    if provider not in {"codex_skill", "codex_exec", "codex"}:
-        raise KBError(f"Unsupported provider: {provider}")
+    if provider != "codex_skill":
+        raise KBError(
+            f"Unsupported provider: {provider}. This command currently supports only 'codex_skill'."
+        )
 
     incremental = detect_incremental(
         paths.corpus,
@@ -169,7 +167,7 @@ def build_kb(
         relative_root=paths.root,
         candidate_paths=_git_candidate_paths(paths.root) if update else None,
     )
-    detection = detect(paths.corpus)
+    detection = incremental
     if detection.get("total_files", 0) == 0:
         raise KBError(f"No supported files found in {paths.corpus}")
 
@@ -223,7 +221,7 @@ def _load_existing_summary(paths: KBPaths, *, wiki_index: Path | None = None) ->
         output_tokens=usage["output_tokens"],
         cached_input_tokens=usage["cached_input_tokens"],
         semantic_stats_available=False,
-        usage_available=False,
+        usage_available=usage["usage_available"],
     )
 
 
@@ -261,7 +259,10 @@ def _run_codex_skill(
         command.extend(["--model", model])
     command.append(prompt)
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        raise KBError("codex is not installed or not on PATH") from exc
     usage = _parse_codex_usage(completed.stdout)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
@@ -490,95 +491,6 @@ def _count_manifest_files(manifest_path: Path) -> int:
     return 0
 
 
-def _extract_code(detection: dict[str, Any], *, kb_root: Path) -> dict[str, Any]:
-    """Run AST extraction across all detected code files."""
-    code_files = [Path(path) for path in detection["files"].get("code", [])]
-    if not code_files:
-        return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
-    result = extract(code_files)
-    result.setdefault("hyperedges", [])
-    result.setdefault("input_tokens", 0)
-    result.setdefault("output_tokens", 0)
-    return _normalize_source_files(result, kb_root=kb_root)
-
-
-def _semantic_detection(detection: dict[str, Any]) -> dict[str, list[str]]:
-    """Return the non-code files that participate in semantic extraction."""
-    return {
-        "document": list(detection["files"].get("document", [])),
-        "paper": list(detection["files"].get("paper", [])),
-        "image": list(detection["files"].get("image", [])),
-        "video": list(detection["files"].get("video", [])),
-    }
-
-
-def _extract_semantic(
-    paths: KBPaths,
-    semantic_detection: dict[str, list[str]],
-    provider_runner: Any,
-    *,
-    tokens: dict[str, int],
-    allow_semantic: bool,
-) -> tuple[dict[str, Any], dict[str, int]]:
-    """Run semantic extraction with cache reuse and optional transcription."""
-    semantic_files = [
-        *semantic_detection["document"],
-        *semantic_detection["paper"],
-        *semantic_detection["image"],
-    ]
-
-    transcript_paths: list[str] = []
-    if semantic_detection["video"]:
-        prompt = build_whisper_prompt([])
-        transcript_paths = transcribe_all(
-            semantic_detection["video"],
-            output_dir=paths.out / "transcripts",
-            initial_prompt=prompt,
-        )
-        semantic_files.extend(transcript_paths)
-
-    cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(semantic_files, root=paths.root)
-    new_nodes: list[dict[str, Any]] = []
-    new_edges: list[dict[str, Any]] = []
-    new_hyperedges: list[dict[str, Any]] = []
-
-    if uncached and not allow_semantic:
-        raise KBError(
-            "Non-code files changed but this update path is code-only. "
-            "Run `graphify build <kb_root>` or `graphify update <kb_root>` with a configured provider."
-        )
-
-    if uncached:
-        for chunk in _chunk_files(uncached):
-            result = provider_runner.extract_chunk(chunk, kb_root=paths.root)
-            result = _normalize_source_files(result, kb_root=paths.root)
-            new_nodes.extend(result.get("nodes", []))
-            new_edges.extend(result.get("edges", []))
-            new_hyperedges.extend(result.get("hyperedges", []))
-            tokens["input"] += int(result.get("input_tokens", 0))
-            tokens["output"] += int(result.get("output_tokens", 0))
-        save_semantic_cache(new_nodes, new_edges, new_hyperedges, root=paths.root)
-
-    merged = {
-        "nodes": _dedupe_nodes([*cached_nodes, *new_nodes]),
-        "edges": [*cached_edges, *new_edges],
-        "hyperedges": [*cached_hyperedges, *new_hyperedges],
-        "input_tokens": tokens["input"],
-        "output_tokens": tokens["output"],
-    }
-    return merged, {"cache_hits": len(semantic_files) - len(uncached), "extracted_files": len(uncached)}
-
-
-def _dedupe_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate nodes by id, keeping the last occurrence."""
-    deduped: dict[str, dict[str, Any]] = {}
-    for node in nodes:
-        node_id = node.get("id")
-        if node_id:
-            deduped[node_id] = node
-    return list(deduped.values())
-
-
 def _normalize_source_files(payload: dict[str, Any], *, kb_root: Path) -> dict[str, Any]:
     """Rewrite absolute `source_file` paths relative to the KB root when possible."""
     office_map = _office_sidecar_map(kb_root)
@@ -665,29 +577,6 @@ def _rewrite_text_provenance(path: Path, office_map: dict[str, str]) -> None:
         path.write_text(updated, encoding="utf-8")
 
 
-def _chunk_files(files: list[str], chunk_size: int = 20) -> list[list[Path]]:
-    """Split semantic extraction files into chunks, isolating images."""
-    grouped: dict[Path, list[Path]] = {}
-    image_chunks: list[list[Path]] = []
-    for file_path in sorted(Path(f) for f in files):
-        if file_path.suffix.lower() in IMAGE_EXTENSIONS:
-            image_chunks.append([file_path])
-            continue
-        grouped.setdefault(file_path.parent, []).append(file_path)
-
-    chunks: list[list[Path]] = []
-    current: list[Path] = []
-    for _, dir_files in sorted(grouped.items(), key=lambda item: str(item[0])):
-        for file_path in dir_files:
-            current.append(file_path)
-            if len(current) >= chunk_size:
-                chunks.append(current)
-                current = []
-    if current:
-        chunks.append(current)
-    return [*chunks, *image_chunks]
-
-
 def _git_candidate_paths(root: Path) -> set[str] | None:
     """Return repo-relative changed/untracked files when the KB root is a git repo."""
     if not (root / ".git").exists():
@@ -707,22 +596,3 @@ def _git_candidate_paths(root: Path) -> set[str] | None:
             continue
         candidates.add(entry.split(" -> ", 1)[-1])
     return candidates
-
-
-def _is_code_only_update(incremental: dict[str, Any]) -> bool:
-    """Return True when only code files changed or nothing semantic was deleted."""
-    new_files = incremental.get("new_files", {})
-    deleted_files = incremental.get("deleted_files", [])
-    semantic_changed = any(new_files.get(kind) for kind in ("document", "paper", "image", "video"))
-    if deleted_files:
-        return False
-    return not semantic_changed
-
-
-def _make_provider(name: str, *, model: str | None) -> Any:
-    """Construct a semantic extraction provider."""
-    if name != "codex_exec":
-        raise KBError(f"Unsupported provider: {name}")
-    from graphify.provider import CodexExecProvider
-
-    return CodexExecProvider(model=model)

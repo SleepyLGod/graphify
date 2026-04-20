@@ -5,6 +5,7 @@ import json
 import subprocess
 import tempfile
 from datetime import datetime, timezone
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,10 @@ def sync_status(root: Path | str) -> dict[str, Any]:
     config = load_config(paths.root)
     state: dict[str, Any] = {}
     if paths.sync_state_file.exists():
-        state = json.loads(paths.sync_state_file.read_text(encoding="utf-8"))
+        try:
+            state = json.loads(paths.sync_state_file.read_text(encoding="utf-8"))
+        except (JSONDecodeError, OSError):
+            state = {}
     return {
         "kb_root": str(paths.root),
         "configured_remote": config["kb"].get("sync_remote", ""),
@@ -128,9 +132,11 @@ def _write_files_from(kb_root: Path, local_root: Path, scope: str) -> str:
 
 def _included_relative_files(kb_root: Path, local_root: Path, scope: str) -> list[str]:
     """Return relative file paths to sync from `local_root`."""
+    file_paths = sorted(p for p in local_root.rglob("*") if p.is_file())
+    git_ignored = _git_ignored_paths(kb_root, file_paths)
     allowed: list[str] = []
-    for file_path in sorted(p for p in local_root.rglob("*") if p.is_file()):
-        if _should_ignore(kb_root, file_path, scope):
+    for file_path in file_paths:
+        if _should_ignore(kb_root, file_path, scope, git_ignored=git_ignored):
             continue
         allowed.append(file_path.relative_to(local_root).as_posix())
     return allowed
@@ -138,8 +144,10 @@ def _included_relative_files(kb_root: Path, local_root: Path, scope: str) -> lis
 
 def _prune_ignored_files(kb_root: Path, local_root: Path, scope: str) -> None:
     """Remove ignored files after a pull so restore results match local ignore rules."""
-    for file_path in sorted((p for p in local_root.rglob("*") if p.is_file()), reverse=True):
-        if _should_ignore(kb_root, file_path, scope):
+    file_paths = sorted((p for p in local_root.rglob("*") if p.is_file()), reverse=True)
+    git_ignored = _git_ignored_paths(kb_root, file_paths)
+    for file_path in file_paths:
+        if _should_ignore(kb_root, file_path, scope, git_ignored=git_ignored):
             file_path.unlink(missing_ok=True)
     _remove_empty_dirs(local_root)
 
@@ -152,33 +160,45 @@ def _remove_empty_dirs(root: Path) -> None:
         directory.rmdir()
 
 
-def _should_ignore(kb_root: Path, path: Path, scope: str) -> bool:
+def _should_ignore(kb_root: Path, path: Path, scope: str, *, git_ignored: set[str]) -> bool:
     """Return True when a path should be excluded from sync for the requested scope."""
-    if _is_git_ignored(kb_root, path):
+    if _relative_git_path(kb_root, path) in git_ignored:
         return True
     return _is_graphify_ignored(kb_root, path, scope)
 
 
-def _is_git_ignored(kb_root: Path, path: Path) -> bool:
-    """Return True when git ignore rules exclude the path."""
+def _relative_git_path(kb_root: Path, path: Path) -> str | None:
+    """Return a git-style relative path under the KB root, or None when unrelated."""
     try:
         rel_path = path.relative_to(kb_root).as_posix()
     except ValueError:
-        return False
+        return None
     if not rel_path or rel_path.startswith(".git/") or rel_path == ".git":
-        return True
+        return None
+    return rel_path
 
-    completed = subprocess.run(
-        ["git", "-C", str(kb_root), "check-ignore", "--quiet", rel_path],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if completed.returncode == 0:
-        return True
-    if completed.returncode == 1:
-        return False
-    return False
+
+def _git_ignored_paths(kb_root: Path, paths: list[Path]) -> set[str]:
+    """Return git-ignored relative paths for the provided files."""
+    if not (kb_root / ".git").exists():
+        return set()
+    rel_paths = [rel_path for path in paths if (rel_path := _relative_git_path(kb_root, path))]
+    if not rel_paths:
+        return set()
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(kb_root), "check-ignore", "--stdin"],
+            input="\n".join(rel_paths),
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except FileNotFoundError:
+        return set()
+    if completed.returncode not in {0, 1}:
+        return set()
+    return {line for line in completed.stdout.splitlines() if line}
 
 
 def _is_graphify_ignored(kb_root: Path, path: Path, scope: str) -> bool:
