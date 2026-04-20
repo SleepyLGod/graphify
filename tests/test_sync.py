@@ -38,6 +38,13 @@ def test_sync_status_without_state(tmp_path):
     assert status["last_sync"] == {}
 
 
+def test_sync_status_with_corrupt_state(tmp_path):
+    paths = init_kb(tmp_path / "ai-wiki")
+    paths.sync_state_file.write_text("{", encoding="utf-8")
+    status = sync_status(paths.root)
+    assert status["last_sync"] == {}
+
+
 def test_included_relative_files_respects_gitignore(tmp_path):
     paths = init_kb(tmp_path / "ai-wiki")
     subprocess.run(["git", "init", str(paths.root)], check=True, capture_output=True, text=True)

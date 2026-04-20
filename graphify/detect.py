@@ -535,13 +535,12 @@ def detect_incremental(
         for f in file_list:
             path = Path(f)
             key = _manifest_key(path, rel_root)
-            current_keys.add(key)
             previous = manifest.get(key)
             try:
                 stat = path.stat()
             except OSError:
-                new_files[ftype].append(f)
                 continue
+            current_keys.add(key)
 
             should_hash = previous is None
             if not should_hash and normalized_candidates is not None and key in normalized_candidates:

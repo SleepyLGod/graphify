@@ -925,12 +925,12 @@ def main() -> None:
         print("    --dir <path>            target directory (default: ./raw)")
         print("  init-kb <path>          create a local graphify knowledge-base directory")
         print("    --git                   initialize the KB root as a git repository")
-        print("  build <path>            build graph outputs for a knowledge base or corpus")
+        print("  build <path>            build graph outputs for a knowledge base")
         print("    --model NAME            override the Codex model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
         print("  watch <path>            watch a folder and rebuild the graph on code changes")
-        print("  update <path>           incrementally update a graphify knowledge base")
+        print("  update <path>           update a graphify knowledge base or AST-refresh a code graph")
         print("    --model NAME            override the Codex model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
@@ -1321,20 +1321,13 @@ def main() -> None:
             print("Usage: graphify build <path> [--model NAME] [--no-wiki] [--no-html]", file=sys.stderr)
             sys.exit(1)
         kb_root = Path(sys.argv[2])
-        provider = None
         model = None
         include_wiki = "--no-wiki" not in sys.argv[3:]
         include_html = "--no-html" not in sys.argv[3:]
         args = sys.argv[3:]
         i = 0
         while i < len(args):
-            if args[i] == "--provider" and i + 1 < len(args):
-                provider = args[i + 1]
-                i += 2
-            elif args[i].startswith("--provider="):
-                provider = args[i].split("=", 1)[1]
-                i += 1
-            elif args[i] == "--model" and i + 1 < len(args):
+            if args[i] == "--model" and i + 1 < len(args):
                 model = args[i + 1]
                 i += 2
             elif args[i].startswith("--model="):
@@ -1346,7 +1339,6 @@ def main() -> None:
         try:
             summary = build_kb(
                 kb_root,
-                provider_name=provider,
                 model=model,
                 update=False,
                 include_wiki=include_wiki,
@@ -1482,20 +1474,13 @@ def main() -> None:
         if not watch_path.exists():
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
-        provider = None
         model = None
         include_wiki = "--no-wiki" not in sys.argv[3:]
         include_html = "--no-html" not in sys.argv[3:]
         args = sys.argv[3:]
         i = 0
         while i < len(args):
-            if args[i] == "--provider" and i + 1 < len(args):
-                provider = args[i + 1]
-                i += 2
-            elif args[i].startswith("--provider="):
-                provider = args[i].split("=", 1)[1]
-                i += 1
-            elif args[i] == "--model" and i + 1 < len(args):
+            if args[i] == "--model" and i + 1 < len(args):
                 model = args[i + 1]
                 i += 2
             elif args[i].startswith("--model="):
@@ -1503,11 +1488,16 @@ def main() -> None:
                 i += 1
             else:
                 i += 1
-        from graphify.kb import KBError, build_kb
+        from graphify.kb import KBError, build_kb, is_kb_root
+        if not is_kb_root(watch_path):
+            from graphify.watch import _rebuild_code
+
+            if not _rebuild_code(watch_path):
+                sys.exit(1)
+            return
         try:
             summary = build_kb(
                 watch_path,
-                provider_name=provider,
                 model=model,
                 update=True,
                 include_wiki=include_wiki,

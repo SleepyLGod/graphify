@@ -103,7 +103,7 @@ sync_remote = ""
 Fields:
 
 - `provider`
-  - current recommended value: `codex_skill`
+  - currently supported value: `codex_skill`
 - `model`
   - optional Codex model override
   - leave empty to use the Codex default
