@@ -19,6 +19,8 @@ def test_init_kb_creates_layout(tmp_path):
     assert paths.config_file.exists()
     config = load_config(paths.root)
     assert config["kb"]["provider"] == "codex_skill"
+    assert config["claude"]["runner_command"] == ""
+    assert config["claude"]["runner_args"] == []
 
 
 def test_detect_incremental_with_rich_manifest(tmp_path):
@@ -239,9 +241,253 @@ def test_build_kb_rejects_unsupported_provider_from_config(tmp_path):
     try:
         build_kb(root, include_wiki=False, include_html=False)
     except RuntimeError as exc:
-        assert "currently supports only 'codex_skill'" in str(exc)
+        assert "currently supports only 'codex_skill' and 'claude_skill'" in str(exc)
     else:
         raise AssertionError("build_kb should reject unsupported providers")
+
+
+def test_build_kb_delegates_to_claude_skill_and_records_usage(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = "sonnet"\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner_command = "claude-custom"\n'
+            'runner_args = ["--permission-mode", "bypassPermissions"]\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+        assert cwd == str(paths.root)
+        assert cmd[:6] == [
+            "claude-custom",
+            "--permission-mode",
+            "bypassPermissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+        ]
+        assert "--verbose" in cmd
+        assert "--model" in cmd
+        assert cmd[cmd.index("--model") + 1] == "sonnet"
+        assert cmd[-1] == "/graphify ./raw --no-viz"
+        graph = {
+            "nodes": [
+                {
+                    "id": "sample_answer",
+                    "label": "answer()",
+                    "file_type": "code",
+                    "source_file": "raw/sample.py",
+                    "community": 0,
+                }
+            ],
+            "links": [],
+        }
+        (paths.out / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(
+            json.dumps({"version": 2, "files": {"raw/sample.py": {}}}),
+            encoding="utf-8",
+        )
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init"}),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "usage": {
+                            "input_tokens": 21,
+                            "output_tokens": 13,
+                            "cache_read_input_tokens": 8,
+                        },
+                    }
+                ),
+            ]
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, include_wiki=False, include_html=False)
+    assert summary.input_tokens == 21
+    assert summary.output_tokens == 13
+    assert summary.cached_input_tokens == 8
+    assert summary.usage_available is True
+
+
+def test_build_kb_claude_usage_falls_back_to_model_usage(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner_command = "claude-custom"\n'
+            'runner_args = []\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+                "modelUsage": {
+                    "claude-sonnet": {
+                        "inputTokens": 33,
+                        "outputTokens": 11,
+                        "cacheReadInputTokens": 7,
+                    }
+                },
+            }
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, include_wiki=False, include_html=False)
+    assert summary.input_tokens == 33
+    assert summary.output_tokens == 11
+    assert summary.cached_input_tokens == 7
+    assert summary.usage_available is True
+
+
+def test_build_kb_uses_default_claude_runner_when_config_is_empty(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner_command = ""\n'
+            'runner_args = []\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    monkeypatch.setattr("graphify.kb._DEFAULT_CLAUDE_RUNNER_COMMAND", "claude-dev")
+    monkeypatch.setattr("graphify.kb._DEFAULT_CLAUDE_RUNNER_ARGS", ["run", "/tmp/claude-dev.ts"])
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+        assert cmd[:8] == [
+            "claude-dev",
+            "run",
+            "/tmp/claude-dev.ts",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "/graphify ./raw --no-viz",
+        ]
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "result", "subtype": "success", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, include_wiki=False, include_html=False)
+    assert summary.input_tokens == 1
+    assert summary.output_tokens == 2
+
+
+def test_build_kb_cli_runner_override_replaces_default_args(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner_command = "claude-dev"\n'
+            'runner_args = ["run", "/tmp/claude-dev.ts"]\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+        assert cmd[:5] == ["claude-override", "--print", "--output-format", "stream-json", "--verbose"]
+        assert "run" not in cmd
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "result", "subtype": "success", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, runner_command="claude-override", include_wiki=False, include_html=False)
+    assert summary.input_tokens == 1
+
+
+def test_build_kb_rejects_invalid_claude_runner_args(tmp_path):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner_command = "claude-custom"\n'
+            'runner_args = "not-a-list"\n'
+        ),
+        encoding="utf-8",
+    )
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    try:
+        build_kb(root, include_wiki=False, include_html=False)
+    except RuntimeError as exc:
+        assert "Invalid `claude.runner_args`" in str(exc)
+    else:
+        raise AssertionError("build_kb should reject invalid Claude runner args")
 
 
 def test_build_kb_update_reuses_existing_usage_on_noop(tmp_path):

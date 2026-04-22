@@ -926,12 +926,16 @@ def main() -> None:
         print("  init-kb <path>          create a local graphify knowledge-base directory")
         print("    --git                   initialize the KB root as a git repository")
         print("  build <path>            build graph outputs for a knowledge base")
-        print("    --model NAME            override the Codex model")
+        print("    --provider NAME         host provider: codex_skill|claude_skill")
+        print("    --runner PATH           override the Claude runner command")
+        print("    --model NAME            override the host model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
         print("  watch <path>            watch a folder and rebuild the graph on code changes")
         print("  update <path>           update a graphify knowledge base or AST-refresh a code graph")
-        print("    --model NAME            override the Codex model")
+        print("    --provider NAME         host provider: codex_skill|claude_skill")
+        print("    --runner PATH           override the Claude runner command")
+        print("    --model NAME            override the host model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
         print("  sync push <path>        push KB data to a configured rclone remote")
@@ -1318,16 +1322,34 @@ def main() -> None:
 
     elif cmd == "build":
         if len(sys.argv) < 3:
-            print("Usage: graphify build <path> [--model NAME] [--no-wiki] [--no-html]", file=sys.stderr)
+            print(
+                "Usage: graphify build <path> [--provider NAME] [--runner PATH] "
+                "[--model NAME] [--no-wiki] [--no-html]",
+                file=sys.stderr,
+            )
             sys.exit(1)
         kb_root = Path(sys.argv[2])
         model = None
+        provider = None
+        runner = None
         include_wiki = "--no-wiki" not in sys.argv[3:]
         include_html = "--no-html" not in sys.argv[3:]
         args = sys.argv[3:]
         i = 0
         while i < len(args):
-            if args[i] == "--model" and i + 1 < len(args):
+            if args[i] == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+                i += 2
+            elif args[i].startswith("--provider="):
+                provider = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--runner" and i + 1 < len(args):
+                runner = args[i + 1]
+                i += 2
+            elif args[i].startswith("--runner="):
+                runner = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--model" and i + 1 < len(args):
                 model = args[i + 1]
                 i += 2
             elif args[i].startswith("--model="):
@@ -1340,6 +1362,8 @@ def main() -> None:
             summary = build_kb(
                 kb_root,
                 model=model,
+                provider_name=provider,
+                runner_command=runner,
                 update=False,
                 include_wiki=include_wiki,
                 include_html=include_html,
@@ -1475,12 +1499,26 @@ def main() -> None:
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
         model = None
+        provider = None
+        runner = None
         include_wiki = "--no-wiki" not in sys.argv[3:]
         include_html = "--no-html" not in sys.argv[3:]
         args = sys.argv[3:]
         i = 0
         while i < len(args):
-            if args[i] == "--model" and i + 1 < len(args):
+            if args[i] == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+                i += 2
+            elif args[i].startswith("--provider="):
+                provider = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--runner" and i + 1 < len(args):
+                runner = args[i + 1]
+                i += 2
+            elif args[i].startswith("--runner="):
+                runner = args[i].split("=", 1)[1]
+                i += 1
+            elif args[i] == "--model" and i + 1 < len(args):
                 model = args[i + 1]
                 i += 2
             elif args[i].startswith("--model="):
@@ -1499,6 +1537,8 @@ def main() -> None:
             summary = build_kb(
                 watch_path,
                 model=model,
+                provider_name=provider,
+                runner_command=runner,
                 update=True,
                 include_wiki=include_wiki,
                 include_html=include_html,

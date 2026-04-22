@@ -47,11 +47,16 @@ uv sync --active --extra all
 - audio and video transcription dependencies
 - file watching
 
-### Codex
+### Codex or Claude Code
 
-The KB CLI path delegates full extraction to the installed Codex graphify skill.
+The KB CLI path delegates full extraction to an installed host graphify skill.
 
-Required:
+You can use either:
+
+- Codex through `provider = "codex_skill"`
+- Claude Code through `provider = "claude_skill"`
+
+#### Codex requirements
 
 - `codex` must be installed and authenticated
 - the graphify Codex skill must be installed
@@ -98,19 +103,92 @@ Minimal config:
 provider = "codex_skill"
 model = ""
 sync_remote = ""
+
+[claude]
+runner_command = ""
+runner_args = []
 ```
 
 Fields:
 
 - `provider`
-  - currently supported value: `codex_skill`
+  - supported values: `codex_skill`, `claude_skill`
 - `model`
-  - optional Codex model override
-  - leave empty to use the Codex default
+  - optional host model override
+  - leave empty to use the host default
 - `sync_remote`
   - optional `rclone` remote path such as `gdrive:ai-wiki`
+- `claude.runner_command`
+  - explicit runner program for `claude_skill`
+  - examples:
+    - `claude`
+    - `/Users/von/bin/claude-custom`
+- `claude.runner_args`
+  - optional TOML string array of extra runner arguments
+  - use this for permission-mode flags or wrapper-specific startup arguments
 
-`graphify` does not manage model API keys itself in this flow. Authentication belongs to Codex.
+`graphify` does not manage model API keys itself in this flow. Authentication belongs to the selected host.
+
+#### Claude Code requirements
+
+- the graphify Claude skill must be installed
+- a Claude runner program must be configured explicitly in `.graphify/config.toml`
+- `graphify` does not assume a global `claude` binary exists on `PATH`
+
+Install the Claude skill once:
+
+```bash
+graphify install --platform claude
+graphify claude install
+```
+
+Example configuration for an installed official CLI:
+
+```toml
+[kb]
+provider = "claude_skill"
+model = ""
+sync_remote = ""
+
+[claude]
+runner_command = "claude"
+runner_args = []
+```
+
+Example configuration for a custom launcher program:
+
+```toml
+[kb]
+provider = "claude_skill"
+model = ""
+sync_remote = ""
+
+[claude]
+runner_command = "/Users/von/bin/claude-custom"
+runner_args = ["--permission-mode", "bypassPermissions"]
+```
+
+This runner abstraction is recommended when you want to keep a custom Claude Code fork separate from any future official Claude installation.
+
+By default, `claude_skill` falls back to this local development runner:
+
+```text
+bun run /Users/von/Projects/claude-code/src/bootstrap-entry.ts
+```
+
+That makes the current repo immediately usable with your custom Claude Code fork. You can still override it in either place:
+
+- persistently in `.graphify/config.toml`
+- per command with `--runner`
+
+Examples:
+
+```bash
+graphify build ~/ai-wiki --provider claude_skill
+graphify build ~/ai-wiki --provider claude_skill --runner /Users/von/bin/claude-custom
+graphify update ~/ai-wiki --provider codex_skill
+graphify update ~/ai-wiki --provider claude_skill --runner claude
+```
 
 ## Build
 
@@ -134,7 +212,7 @@ Outputs:
 - `graphify-out/cost.json`
 - optional `graphify-out/graph.html`
 
-The KB wrapper now records real Codex token usage from `codex exec --json`. New runs in `graphify-out/cost.json` should include:
+The KB wrapper now records real host-run token usage from structured host output. New runs in `graphify-out/cost.json` should include:
 
 - `input_tokens`
 - `output_tokens`
@@ -264,7 +342,7 @@ graphify build ~/ai-wiki
 
 ### `cost.json` still shows old zero-token runs
 
-Older runs may still contain zeros from before the KB wrapper switched to real `codex exec --json` usage accounting. Check the newest run, not historical ones.
+Older runs may still contain zeros from before the KB wrapper switched to real structured host usage accounting. Check the newest run, not historical ones.
 
 ### Google Drive OAuth errors with rclone
 

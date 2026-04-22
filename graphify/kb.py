@@ -22,7 +22,17 @@ _DEFAULT_CONFIG = """# graphify knowledge-base config
 provider = "codex_skill"
 model = ""
 sync_remote = ""
+
+[claude]
+runner_command = ""
+runner_args = []
 """
+
+_DEFAULT_CLAUDE_RUNNER_COMMAND = "bun"
+_DEFAULT_CLAUDE_RUNNER_ARGS = [
+    "run",
+    "/Users/von/Projects/claude-code/src/bootstrap-entry.ts",
+]
 
 
 class KBError(RuntimeError):
@@ -85,7 +95,10 @@ def resolve_paths(root: Path | str) -> KBPaths:
 def load_config(root: Path | str) -> dict[str, Any]:
     """Load `.graphify/config.toml`, returning defaults when absent."""
     paths = resolve_paths(root)
-    config: dict[str, Any] = {"kb": {"provider": "codex_skill", "model": "", "sync_remote": ""}}
+    config: dict[str, Any] = {
+        "kb": {"provider": "codex_skill", "model": "", "sync_remote": ""},
+        "claude": {"runner_command": "", "runner_args": []},
+    }
     if not paths.config_file.exists():
         return config
 
@@ -96,6 +109,7 @@ def load_config(root: Path | str) -> dict[str, Any]:
 
     loaded = tomllib.loads(paths.config_file.read_text(encoding="utf-8"))
     config["kb"].update(loaded.get("kb", {}))
+    config["claude"].update(loaded.get("claude", {}))
     return config
 
 
@@ -144,21 +158,24 @@ def build_kb(
     root: Path | str,
     *,
     model: str | None = None,
+    provider_name: str | None = None,
+    runner_command: str | None = None,
     update: bool = False,
     include_wiki: bool = True,
     include_html: bool = True,
 ) -> BuildSummary:
-    """Build or update a local graphify knowledge base via the installed Codex skill."""
+    """Build or update a local graphify knowledge base via the configured host skill."""
     paths = resolve_paths(root)
     if not paths.corpus.exists():
         raise KBError(f"Corpus path not found: {paths.corpus}")
 
     config = load_config(paths.root)
-    provider = config["kb"].get("provider") or "codex_skill"
+    provider = provider_name or (config["kb"].get("provider") or "codex_skill")
     provider_model = model or (config["kb"].get("model") or None)
-    if provider != "codex_skill":
+    if provider not in {"codex_skill", "claude_skill"}:
         raise KBError(
-            f"Unsupported provider: {provider}. This command currently supports only 'codex_skill'."
+            "Unsupported provider: "
+            f"{provider}. This command currently supports only 'codex_skill' and 'claude_skill'."
         )
 
     incremental = detect_incremental(
@@ -179,12 +196,23 @@ def build_kb(
             wiki_index = _generate_wiki_from_graph(paths)
         return _load_existing_summary(paths, wiki_index=wiki_index)
 
-    _run_codex_skill(
-        paths,
-        update=update,
-        include_html=include_html,
-        model=provider_model,
-    )
+    if provider == "codex_skill":
+        _run_codex_skill(
+            paths,
+            update=update,
+            include_html=include_html,
+            model=provider_model,
+        )
+    else:
+        selected_runner_command, selected_runner_args = _claude_runner(config, override_command=runner_command)
+        _run_claude_skill(
+            paths,
+            update=update,
+            include_html=include_html,
+            model=provider_model,
+            runner_command=selected_runner_command,
+            runner_args=selected_runner_args,
+        )
     _normalize_office_provenance(paths, include_html=include_html)
     wiki_index = _generate_wiki_from_graph(paths) if include_wiki else None
     return _summarize_outputs(
@@ -278,10 +306,83 @@ def _run_codex_skill(
     )
 
 
+def _run_claude_skill(
+    paths: KBPaths,
+    *,
+    update: bool,
+    include_html: bool,
+    model: str | None,
+    runner_command: str,
+    runner_args: list[str],
+) -> None:
+    """Run the installed Claude graphify skill via an explicit runner command."""
+    if _find_claude_skill_path(paths.root) is None:
+        raise KBError(
+            "Claude graphify skill is not installed. Run `graphify install --platform claude` first."
+        )
+
+    prompt_parts = [_claude_skill_trigger(paths)]
+    if update:
+        prompt_parts.append("--update")
+    if not include_html:
+        prompt_parts.append("--no-viz")
+    prompt = " ".join(prompt_parts)
+
+    command = [
+        runner_command,
+        *runner_args,
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(paths.root),
+        )
+    except FileNotFoundError as exc:
+        raise KBError(f"Claude runner not found: {runner_command}") from exc
+
+    result = _parse_claude_result(completed.stdout)
+    if completed.returncode != 0:
+        errors = result.get("errors", [])
+        details = "; ".join(str(error) for error in errors if error) or completed.stderr.strip()
+        if not details:
+            details = completed.stdout.strip()
+        raise KBError(f"Claude skill execution failed: {details}")
+    if result.get("subtype") != "success":
+        errors = result.get("errors", [])
+        details = "; ".join(str(error) for error in errors if error) or "unknown Claude error"
+        raise KBError(f"Claude skill execution failed: {details}")
+    if not (paths.out / "graph.json").exists():
+        raise KBError("Claude skill completed without writing graphify-out/graph.json")
+    if not (paths.out / "GRAPH_REPORT.md").exists():
+        raise KBError("Claude skill completed without writing graphify-out/GRAPH_REPORT.md")
+    _append_cost_run(
+        paths.out / "cost.json",
+        _claude_usage_from_result(result),
+        files=_count_manifest_files(paths.manifest_file),
+    )
+
+
 def _codex_skill_trigger(paths: KBPaths) -> str:
     """Return the slash-like skill invocation for the KB corpus."""
     corpus_arg = "./raw" if paths.corpus == paths.root / "raw" else "."
     return f"$graphify {corpus_arg}"
+
+
+def _claude_skill_trigger(paths: KBPaths) -> str:
+    """Return the slash-command invocation for Claude Code."""
+    corpus_arg = "./raw" if paths.corpus == paths.root / "raw" else "."
+    return f"/graphify {corpus_arg}"
 
 
 def _find_codex_skill_path(root: Path) -> Path | None:
@@ -294,6 +395,40 @@ def _find_codex_skill_path(root: Path) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _find_claude_skill_path(root: Path) -> Path | None:
+    """Return the first installed Claude graphify skill path that exists."""
+    candidates = [
+        root / ".claude" / "skills" / "graphify" / "SKILL.md",
+        Path.home() / ".claude" / "skills" / "graphify" / "SKILL.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _claude_runner(config: dict[str, Any], *, override_command: str | None = None) -> tuple[str, list[str]]:
+    """Return the selected Claude runner command and args."""
+    if override_command:
+        return override_command, []
+
+    command = str(config.get("claude", {}).get("runner_command", "")).strip()
+    if command:
+        return command, _claude_runner_args(config)
+
+    return _DEFAULT_CLAUDE_RUNNER_COMMAND, list(_DEFAULT_CLAUDE_RUNNER_ARGS)
+
+
+def _claude_runner_args(config: dict[str, Any]) -> list[str]:
+    """Return validated Claude runner args from config."""
+    raw_args = config.get("claude", {}).get("runner_args", [])
+    if raw_args in ("", None):
+        return []
+    if not isinstance(raw_args, list) or any(not isinstance(arg, str) for arg in raw_args):
+        raise KBError("Invalid `claude.runner_args`: expected a TOML string array.")
+    return list(raw_args)
 
 
 def _generate_wiki_from_graph(paths: KBPaths) -> Path:
@@ -441,6 +576,67 @@ def _parse_codex_usage(output: str) -> dict[str, int | bool]:
             "usage_available": True,
         }
     return usage
+
+
+def _parse_claude_result(output: str) -> dict[str, Any]:
+    """Parse the final Claude `result` message from stream-json output."""
+    result: dict[str, Any] = {}
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "result":
+            continue
+        result = event
+    return result
+
+
+def _claude_usage_from_result(result: dict[str, Any]) -> dict[str, int | bool]:
+    """Convert a Claude result message into graphify cost fields."""
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        parsed = {
+            "input_tokens": int(usage.get("input_tokens", 0)),
+            "output_tokens": int(usage.get("output_tokens", 0)),
+            "cached_input_tokens": int(usage.get("cache_read_input_tokens", 0)),
+            "usage_available": True,
+        }
+        if (
+            parsed["input_tokens"] > 0
+            or parsed["output_tokens"] > 0
+            or parsed["cached_input_tokens"] > 0
+        ):
+            return parsed
+
+    model_usage = result.get("modelUsage")
+    if isinstance(model_usage, dict):
+        input_tokens = 0
+        output_tokens = 0
+        cached_input_tokens = 0
+        for item in model_usage.values():
+            if not isinstance(item, dict):
+                continue
+            input_tokens += int(item.get("inputTokens", 0))
+            output_tokens += int(item.get("outputTokens", 0))
+            cached_input_tokens += int(item.get("cacheReadInputTokens", 0))
+        if input_tokens > 0 or output_tokens > 0 or cached_input_tokens > 0:
+            return {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_input_tokens": cached_input_tokens,
+                "usage_available": True,
+            }
+
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "usage_available": False,
+    }
 
 
 def _append_cost_run(cost_path: Path, usage: dict[str, int | bool], *, files: int) -> None:
