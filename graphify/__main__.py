@@ -931,14 +931,14 @@ def main() -> None:
         print("    --git                   initialize the KB root as a git repository")
         print("  build <path>            build graph outputs for a knowledge base")
         print("    --provider NAME         host provider: codex_skill|claude_skill")
-        print("    --runner PATH           override the Claude runner command")
+        print("    --runner NAME|PATH      override the Claude runner")
         print("    --model NAME            override the host model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
         print("  watch <path>            watch a folder and rebuild the graph on code changes")
         print("  update <path>           update a graphify knowledge base or AST-refresh a code graph")
         print("    --provider NAME         host provider: codex_skill|claude_skill")
-        print("    --runner PATH           override the Claude runner command")
+        print("    --runner NAME|PATH      override the Claude runner")
         print("    --model NAME            override the host model")
         print("    --no-wiki              skip wiki export")
         print("    --no-html              skip HTML export")
@@ -1327,7 +1327,7 @@ def main() -> None:
     elif cmd == "build":
         if len(sys.argv) < 3:
             print(
-                "Usage: graphify build <path> [--provider NAME] [--runner PATH] "
+                "Usage: graphify build <path> [--provider NAME] [--runner NAME|PATH] "
                 "[--model NAME] [--no-wiki] [--no-html]",
                 file=sys.stderr,
             )

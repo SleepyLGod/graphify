@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,16 +25,27 @@ provider = "codex_skill"
 model = ""
 sync_remote = ""
 
+[codex]
+runner_command = ""
+
 [claude]
+runner = "claude"
 runner_command = ""
 runner_args = []
+
+[claude.runners.claude]
+command = "claude"
+args = []
+
+[claude.runners.von-claude]
+command = "von-claude"
+args = []
 """
 
-_DEFAULT_CLAUDE_RUNNER_COMMAND = "bun"
-_DEFAULT_CLAUDE_RUNNER_ARGS = [
-    "run",
-    "/Users/von/Projects/claude-code/src/bootstrap-entry.ts",
-]
+_DEFAULT_CLAUDE_RUNNERS = {
+    "claude": {"command": "claude", "args": []},
+    "von-claude": {"command": "von-claude", "args": []},
+}
 
 
 class KBError(RuntimeError):
@@ -97,7 +110,13 @@ def load_config(root: Path | str) -> dict[str, Any]:
     paths = resolve_paths(root)
     config: dict[str, Any] = {
         "kb": {"provider": "codex_skill", "model": "", "sync_remote": ""},
-        "claude": {"runner_command": "", "runner_args": []},
+        "codex": {"runner_command": ""},
+        "claude": {
+            "runner": "claude",
+            "runner_command": "",
+            "runner_args": [],
+            "runners": {name: dict(value) for name, value in _DEFAULT_CLAUDE_RUNNERS.items()},
+        },
     }
     if not paths.config_file.exists():
         return config
@@ -109,7 +128,23 @@ def load_config(root: Path | str) -> dict[str, Any]:
 
     loaded = tomllib.loads(paths.config_file.read_text(encoding="utf-8"))
     config["kb"].update(loaded.get("kb", {}))
-    config["claude"].update(loaded.get("claude", {}))
+    codex_config = loaded.get("codex", {})
+    if isinstance(codex_config, dict):
+        config["codex"].update(codex_config)
+    claude_config = loaded.get("claude", {})
+    if isinstance(claude_config, dict):
+        runners = claude_config.get("runners")
+        if claude_config.get("runner_command") and "runner" not in claude_config:
+            config["claude"]["runner"] = ""
+        for key, value in claude_config.items():
+            if key != "runners":
+                config["claude"][key] = value
+        if isinstance(runners, dict):
+            for name, runner in runners.items():
+                if isinstance(runner, dict):
+                    current = dict(config["claude"]["runners"].get(name, {}))
+                    current.update(runner)
+                    config["claude"]["runners"][name] = current
     return config
 
 
@@ -197,11 +232,13 @@ def build_kb(
         return _load_existing_summary(paths, wiki_index=wiki_index)
 
     if provider == "codex_skill":
+        selected_runner_command = _codex_runner(config, override_command=runner_command)
         _run_codex_skill(
             paths,
             update=update,
             include_html=include_html,
             model=provider_model,
+            runner_command=selected_runner_command,
         )
     else:
         selected_runner_command, selected_runner_args = _claude_runner(config, override_command=runner_command)
@@ -259,6 +296,7 @@ def _run_codex_skill(
     update: bool,
     include_html: bool,
     model: str | None,
+    runner_command: str,
 ) -> None:
     """Run the installed Codex graphify skill against the KB corpus."""
     if _find_codex_skill_path(paths.root) is None:
@@ -273,8 +311,9 @@ def _run_codex_skill(
         prompt_parts.append("--no-viz")
     prompt = " ".join(prompt_parts)
 
+    codex_command = _resolve_executable(runner_command)
     command = [
-        "codex",
+        codex_command,
         "exec",
         "--json",
         "--skip-git-repo-check",
@@ -288,9 +327,19 @@ def _run_codex_skill(
     command.append(prompt)
 
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_runner_env(codex_command),
+        )
     except FileNotFoundError as exc:
-        raise KBError("codex is not installed or not on PATH") from exc
+        raise KBError(
+            f"Codex runner not found: {runner_command}. "
+            "Shell functions and aliases are not visible to graphify; configure "
+            "`codex.runner_command` or pass `--runner /absolute/path/to/codex`."
+        ) from exc
     usage = _parse_codex_usage(completed.stdout)
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or completed.stdout.strip()
@@ -328,8 +377,9 @@ def _run_claude_skill(
         prompt_parts.append("--no-viz")
     prompt = " ".join(prompt_parts)
 
+    resolved_runner_command = _resolve_executable(runner_command)
     command = [
-        runner_command,
+        resolved_runner_command,
         *runner_args,
         "--print",
         "--output-format",
@@ -347,6 +397,7 @@ def _run_claude_skill(
             text=True,
             check=False,
             cwd=str(paths.root),
+            env=_runner_env(resolved_runner_command),
         )
     except FileNotFoundError as exc:
         raise KBError(f"Claude runner not found: {runner_command}") from exc
@@ -385,6 +436,29 @@ def _claude_skill_trigger(paths: KBPaths) -> str:
     return f"/graphify {corpus_arg}"
 
 
+def _resolve_executable(command: str) -> str:
+    """Resolve a PATH command to an absolute executable when possible."""
+    if _has_path_separator(command):
+        return command
+    return shutil.which(command) or command
+
+
+def _runner_env(command: str) -> dict[str, str]:
+    """Return an environment that keeps a resolved runner discoverable by child processes."""
+    env = os.environ.copy()
+    command_path = Path(command).expanduser()
+    if command_path.parent != Path("."):
+        env["PATH"] = f"{command_path.parent}{os.pathsep}{env.get('PATH', '')}"
+    if "claude" in command_path.name:
+        env["CLAUDE_CODE_TEAMMATE_COMMAND"] = str(command_path)
+    return env
+
+
+def _has_path_separator(command: str) -> bool:
+    """Return True when a command already includes a filesystem path component."""
+    return os.sep in command or (os.altsep is not None and os.altsep in command)
+
+
 def _find_codex_skill_path(root: Path) -> Path | None:
     """Return the first installed Codex graphify skill path that exists."""
     candidates = [
@@ -409,16 +483,48 @@ def _find_claude_skill_path(root: Path) -> Path | None:
     return None
 
 
+def _codex_runner(config: dict[str, Any], *, override_command: str | None = None) -> str:
+    """Return the selected Codex runner command."""
+    if override_command:
+        return override_command
+    command = str(config.get("codex", {}).get("runner_command", "")).strip()
+    return command or "codex"
+
+
 def _claude_runner(config: dict[str, Any], *, override_command: str | None = None) -> tuple[str, list[str]]:
     """Return the selected Claude runner command and args."""
     if override_command:
-        return override_command, []
+        return _resolve_claude_runner(config, override_command)
 
-    command = str(config.get("claude", {}).get("runner_command", "")).strip()
+    claude_config = config.get("claude", {})
+    runner = str(claude_config.get("runner", "")).strip()
+    if runner:
+        return _resolve_claude_runner(config, runner)
+
+    command = str(claude_config.get("runner_command", "")).strip()
     if command:
         return command, _claude_runner_args(config)
 
-    return _DEFAULT_CLAUDE_RUNNER_COMMAND, list(_DEFAULT_CLAUDE_RUNNER_ARGS)
+    return _resolve_claude_runner(config, "claude")
+
+
+def _resolve_claude_runner(config: dict[str, Any], selector: str) -> tuple[str, list[str]]:
+    """Resolve a named Claude runner or use the selector as a direct command."""
+    runners = config.get("claude", {}).get("runners", {})
+    runner = runners.get(selector) if isinstance(runners, dict) else None
+    if runner is None:
+        return selector, []
+    if not isinstance(runner, dict):
+        raise KBError(f"Invalid Claude runner `{selector}`: expected a TOML table.")
+    command = str(runner.get("command", "")).strip()
+    if not command:
+        raise KBError(f"Invalid Claude runner `{selector}`: missing command.")
+    args = runner.get("args", [])
+    if args in ("", None):
+        args = []
+    if not isinstance(args, list) or any(not isinstance(arg, str) for arg in args):
+        raise KBError(f"Invalid Claude runner `{selector}`: args must be a TOML string array.")
+    return command, list(args)
 
 
 def _claude_runner_args(config: dict[str, Any]) -> list[str]:

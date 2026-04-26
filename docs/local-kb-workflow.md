@@ -104,9 +104,21 @@ provider = "codex_skill"
 model = ""
 sync_remote = ""
 
+[codex]
+runner_command = ""
+
 [claude]
+runner = "claude"
 runner_command = ""
 runner_args = []
+
+[claude.runners.claude]
+command = "claude"
+args = []
+
+[claude.runners.von-claude]
+command = "von-claude"
+args = []
 ```
 
 Fields:
@@ -118,22 +130,52 @@ Fields:
   - leave empty to use the host default
 - `sync_remote`
   - optional `rclone` remote path such as `gdrive:ai-wiki`
-- `claude.runner_command`
-  - explicit runner program for `claude_skill`
-  - examples:
-    - `claude`
-    - `/Users/von/bin/claude-custom`
-- `claude.runner_args`
+- `codex.runner_command`
+  - optional Codex CLI executable path
+  - leave empty to resolve `codex` from `PATH`
+- `claude.runner`
+  - default named runner for `claude_skill`
+  - default value: `claude`
+- `claude.runners.<name>.command`
+  - executable command for a named runner
+- `claude.runners.<name>.args`
   - optional TOML string array of extra runner arguments
-  - use this for permission-mode flags or wrapper-specific startup arguments
+- `claude.runner_command` and `claude.runner_args`
+  - legacy fallback fields, kept for compatibility
 
 `graphify` does not manage model API keys itself in this flow. Authentication belongs to the selected host.
+
+#### Codex requirements
+
+- the graphify Codex skill must be installed
+- the real `codex` executable must be visible to Python, not only as a shell function or alias
+- if you use `nvm`, either add the real bin directory to `PATH` before running graphify or configure `codex.runner_command`
+
+Install the Codex skill once:
+
+```bash
+graphify install --platform codex
+```
+
+Example configuration with an explicit Codex path:
+
+```toml
+[kb]
+provider = "codex_skill"
+model = ""
+sync_remote = ""
+
+[codex]
+runner_command = "/Users/von/.nvm/versions/node/v22.22.2/bin/codex"
+```
 
 #### Claude Code requirements
 
 - the graphify Claude skill must be installed
-- a Claude runner program must be configured explicitly in `.graphify/config.toml`
-- `graphify` does not assume a global `claude` binary exists on `PATH`
+- official `claude` is the default runner
+- `von-claude` is available as a named custom runner
+- both commands must be available on `PATH` if you use them by name
+- shell functions that inject API settings are not visible to graphify; use exported environment variables or a real wrapper script if the runner needs custom environment
 
 Install the Claude skill once:
 
@@ -151,11 +193,14 @@ model = ""
 sync_remote = ""
 
 [claude]
-runner_command = "claude"
-runner_args = []
+runner = "claude"
+
+[claude.runners.claude]
+command = "claude"
+args = []
 ```
 
-Example configuration for a custom launcher program:
+Example configuration for your custom Claude service:
 
 ```toml
 [kb]
@@ -164,19 +209,14 @@ model = ""
 sync_remote = ""
 
 [claude]
-runner_command = "/Users/von/bin/claude-custom"
-runner_args = ["--permission-mode", "bypassPermissions"]
+runner = "von-claude"
+
+[claude.runners.von-claude]
+command = "von-claude"
+args = []
 ```
 
-This runner abstraction is recommended when you want to keep a custom Claude Code fork separate from any future official Claude installation.
-
-By default, `claude_skill` falls back to this local development runner:
-
-```text
-bun run /Users/von/Projects/claude-code/src/bootstrap-entry.ts
-```
-
-That makes the current repo immediately usable with your custom Claude Code fork. You can still override it in either place:
+You can override the runner per command:
 
 - persistently in `.graphify/config.toml`
 - per command with `--runner`
@@ -185,6 +225,8 @@ Examples:
 
 ```bash
 graphify build ~/ai-wiki --provider claude_skill
+graphify build ~/ai-wiki --provider codex_skill --runner /Users/von/.nvm/versions/node/v22.22.2/bin/codex
+graphify build ~/ai-wiki --provider claude_skill --runner von-claude
 graphify build ~/ai-wiki --provider claude_skill --runner /Users/von/bin/claude-custom
 graphify update ~/ai-wiki --provider codex_skill
 graphify update ~/ai-wiki --provider claude_skill --runner claude

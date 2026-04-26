@@ -6,9 +6,21 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 from graphify.detect import _manifest_key, detect_incremental, save_manifest
 from graphify.kb import _parse_codex_usage, build_kb, init_kb, load_config
+
+
+def _mock_runner_paths(monkeypatch: Any) -> None:
+    paths = {
+        "codex": "/mock/bin/codex",
+        "claude": "/mock/bin/claude",
+        "claude-custom": "/mock/bin/claude-custom",
+        "legacy-claude": "/mock/bin/legacy-claude",
+        "von-claude": "/mock/bin/von-claude",
+    }
+    monkeypatch.setattr("graphify.kb.shutil.which", lambda command: paths.get(command))
 
 
 def test_init_kb_creates_layout(tmp_path):
@@ -19,8 +31,12 @@ def test_init_kb_creates_layout(tmp_path):
     assert paths.config_file.exists()
     config = load_config(paths.root)
     assert config["kb"]["provider"] == "codex_skill"
+    assert config["codex"]["runner_command"] == ""
+    assert config["claude"]["runner"] == "claude"
     assert config["claude"]["runner_command"] == ""
     assert config["claude"]["runner_args"] == []
+    assert config["claude"]["runners"]["claude"]["command"] == "claude"
+    assert config["claude"]["runners"]["von-claude"]["command"] == "von-claude"
 
 
 def test_detect_incremental_with_rich_manifest(tmp_path):
@@ -136,6 +152,7 @@ def test_manifest_key_normalizes_fallback_separators(tmp_path, monkeypatch):
 def test_build_kb_delegates_to_codex_skill_and_generates_wiki(tmp_path, monkeypatch):
     root = tmp_path / "ai-wiki"
     paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
     (root / ".agents" / "skills" / "graphify").mkdir(parents=True)
     (root / ".agents" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
     (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
@@ -147,8 +164,10 @@ def test_build_kb_delegates_to_codex_skill_and_generates_wiki(tmp_path, monkeypa
     sidecar_hash = hashlib.sha256(str(office.resolve()).encode()).hexdigest()[:8]
     sidecar_rel = f"raw/graphify-out/converted/report_{sidecar_hash}.md"
 
-    def fake_run(cmd, capture_output=True, text=True, check=False):
-        assert cmd[:2] == ["codex", "exec"]
+    def fake_run(cmd, capture_output=True, text=True, check=False, env=None):
+        assert cmd[:2] == ["/mock/bin/codex", "exec"]
+        assert env is not None
+        assert env["PATH"].startswith("/mock/bin:")
         assert "--json" in cmd
         assert cmd[-1] == "$graphify ./raw --no-viz"
         sidecar = paths.corpus / "graphify-out" / "converted" / f"report_{sidecar_hash}.md"
@@ -246,9 +265,86 @@ def test_build_kb_rejects_unsupported_provider_from_config(tmp_path):
         raise AssertionError("build_kb should reject unsupported providers")
 
 
+def test_build_kb_codex_uses_configured_runner_command(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "codex_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[codex]\n'
+            'runner_command = "/tmp/codex-custom"\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".agents" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".agents" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, env=None):
+        assert cmd[:2] == ["/tmp/codex-custom", "exec"]
+        assert env is not None
+        assert env["PATH"].startswith("/tmp:")
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, include_wiki=False, include_html=False)
+    assert summary.output_tokens == 2
+
+
+def test_build_kb_codex_runner_override_wins_over_config(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "codex_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[codex]\n'
+            'runner_command = "/tmp/codex-config"\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".agents" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".agents" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, env=None):
+        assert cmd[:2] == ["/tmp/codex-cli", "exec"]
+        assert env is not None
+        assert env["PATH"].startswith("/tmp:")
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 4}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, runner_command="/tmp/codex-cli", include_wiki=False, include_html=False)
+    assert summary.input_tokens == 3
+
+
 def test_build_kb_delegates_to_claude_skill_and_records_usage(tmp_path, monkeypatch):
     root = tmp_path / "ai-wiki"
     paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
     paths.config_file.write_text(
         (
             '[kb]\n'
@@ -266,10 +362,13 @@ def test_build_kb_delegates_to_claude_skill_and_records_usage(tmp_path, monkeypa
     (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
     (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
 
-    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
         assert cwd == str(paths.root)
+        assert env is not None
+        assert env["PATH"].startswith("/mock/bin:")
+        assert env["CLAUDE_CODE_TEAMMATE_COMMAND"] == "/mock/bin/claude-custom"
         assert cmd[:6] == [
-            "claude-custom",
+            "/mock/bin/claude-custom",
             "--permission-mode",
             "bypassPermissions",
             "--print",
@@ -327,6 +426,7 @@ def test_build_kb_delegates_to_claude_skill_and_records_usage(tmp_path, monkeypa
 def test_build_kb_claude_usage_falls_back_to_model_usage(tmp_path, monkeypatch):
     root = tmp_path / "ai-wiki"
     paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
     paths.config_file.write_text(
         (
             '[kb]\n'
@@ -344,7 +444,7 @@ def test_build_kb_claude_usage_falls_back_to_model_usage(tmp_path, monkeypatch):
     (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
     (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
 
-    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
         (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
         (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
         (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
@@ -379,6 +479,7 @@ def test_build_kb_claude_usage_falls_back_to_model_usage(tmp_path, monkeypatch):
 def test_build_kb_uses_default_claude_runner_when_config_is_empty(tmp_path, monkeypatch):
     root = tmp_path / "ai-wiki"
     paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
     paths.config_file.write_text(
         (
             '[kb]\n'
@@ -387,6 +488,7 @@ def test_build_kb_uses_default_claude_runner_when_config_is_empty(tmp_path, monk
             'sync_remote = ""\n'
             '\n'
             '[claude]\n'
+            'runner = "claude"\n'
             'runner_command = ""\n'
             'runner_args = []\n'
         ),
@@ -396,20 +498,18 @@ def test_build_kb_uses_default_claude_runner_when_config_is_empty(tmp_path, monk
     (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
     (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
 
-    monkeypatch.setattr("graphify.kb._DEFAULT_CLAUDE_RUNNER_COMMAND", "claude-dev")
-    monkeypatch.setattr("graphify.kb._DEFAULT_CLAUDE_RUNNER_ARGS", ["run", "/tmp/claude-dev.ts"])
-
-    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
-        assert cmd[:8] == [
-            "claude-dev",
-            "run",
-            "/tmp/claude-dev.ts",
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
+        assert env is not None
+        assert env["PATH"].startswith("/mock/bin:")
+        assert env["CLAUDE_CODE_TEAMMATE_COMMAND"] == "/mock/bin/claude"
+        assert cmd[:5] == [
+            "/mock/bin/claude",
             "--print",
             "--output-format",
             "stream-json",
             "--verbose",
-            "/graphify ./raw --no-viz",
         ]
+        assert cmd[-1] == "/graphify ./raw --no-viz"
         (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
         (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
         (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
@@ -426,9 +526,10 @@ def test_build_kb_uses_default_claude_runner_when_config_is_empty(tmp_path, monk
     assert summary.output_tokens == 2
 
 
-def test_build_kb_cli_runner_override_replaces_default_args(tmp_path, monkeypatch):
+def test_build_kb_cli_runner_override_can_select_named_runner(tmp_path, monkeypatch):
     root = tmp_path / "ai-wiki"
     paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
     paths.config_file.write_text(
         (
             '[kb]\n'
@@ -437,8 +538,11 @@ def test_build_kb_cli_runner_override_replaces_default_args(tmp_path, monkeypatc
             'sync_remote = ""\n'
             '\n'
             '[claude]\n'
-            'runner_command = "claude-dev"\n'
-            'runner_args = ["run", "/tmp/claude-dev.ts"]\n'
+            'runner = "claude"\n'
+            '\n'
+            '[claude.runners.von-claude]\n'
+            'command = "von-claude"\n'
+            'args = ["--permission-mode", "bypassPermissions"]\n'
         ),
         encoding="utf-8",
     )
@@ -446,9 +550,18 @@ def test_build_kb_cli_runner_override_replaces_default_args(tmp_path, monkeypatc
     (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
     (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
 
-    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None):
-        assert cmd[:5] == ["claude-override", "--print", "--output-format", "stream-json", "--verbose"]
-        assert "run" not in cmd
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
+        assert env is not None
+        assert env["PATH"].startswith("/mock/bin:")
+        assert env["CLAUDE_CODE_TEAMMATE_COMMAND"] == "/mock/bin/von-claude"
+        assert cmd[:6] == [
+            "/mock/bin/von-claude",
+            "--permission-mode",
+            "bypassPermissions",
+            "--print",
+            "--output-format",
+            "stream-json",
+        ]
         (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
         (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
         (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
@@ -460,7 +573,85 @@ def test_build_kb_cli_runner_override_replaces_default_args(tmp_path, monkeypatc
         )
 
     monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
-    summary = build_kb(root, runner_command="claude-override", include_wiki=False, include_html=False)
+    summary = build_kb(root, runner_command="von-claude", include_wiki=False, include_html=False)
+    assert summary.input_tokens == 1
+
+
+def test_build_kb_cli_runner_override_accepts_direct_command(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
+        assert env is not None
+        assert env["PATH"].startswith("/tmp:")
+        assert env["CLAUDE_CODE_TEAMMATE_COMMAND"] == "/tmp/claude-custom"
+        assert cmd[:5] == ["/tmp/claude-custom", "--print", "--output-format", "stream-json", "--verbose"]
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "result", "subtype": "success", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, runner_command="/tmp/claude-custom", include_wiki=False, include_html=False)
+    assert summary.output_tokens == 2
+
+
+def test_build_kb_claude_uses_legacy_runner_command_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "ai-wiki"
+    paths = init_kb(root)
+    _mock_runner_paths(monkeypatch)
+    paths.config_file.write_text(
+        (
+            '[kb]\n'
+            'provider = "claude_skill"\n'
+            'model = ""\n'
+            'sync_remote = ""\n'
+            '\n'
+            '[claude]\n'
+            'runner = ""\n'
+            'runner_command = "legacy-claude"\n'
+            'runner_args = ["--legacy"]\n'
+        ),
+        encoding="utf-8",
+    )
+    (root / ".claude" / "skills" / "graphify").mkdir(parents=True)
+    (root / ".claude" / "skills" / "graphify" / "SKILL.md").write_text("stub", encoding="utf-8")
+    (paths.corpus / "sample.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+
+    def fake_run(cmd, capture_output=True, text=True, check=False, cwd=None, env=None):
+        assert env is not None
+        assert env["PATH"].startswith("/mock/bin:")
+        assert env["CLAUDE_CODE_TEAMMATE_COMMAND"] == "/mock/bin/legacy-claude"
+        assert cmd[:6] == ["/mock/bin/legacy-claude", "--legacy", "--print", "--output-format", "stream-json", "--verbose"]
+        (paths.out / "graph.json").write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+        (paths.out / "GRAPH_REPORT.md").write_text("report", encoding="utf-8")
+        (paths.manifest_file).write_text(json.dumps({"version": 2, "files": {}}), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({"type": "result", "subtype": "success", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            "",
+        )
+
+    monkeypatch.setattr("graphify.kb.subprocess.run", fake_run)
+    summary = build_kb(root, include_wiki=False, include_html=False)
     assert summary.input_tokens == 1
 
 
