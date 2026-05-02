@@ -2,6 +2,57 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
 
+## 0.5.7 (2026-04-30)
+
+- Feat: YAML/YML files now indexed for semantic extraction — Kubernetes, Kustomize, Helm, and any YAML corpus now picked up automatically (#633)
+
+## 0.5.6 (2026-04-30)
+
+- Fix: `NameError: name '_os' is not defined` crash after `graphify update` — this was fixed in v5 branch but not released to PyPI (#618, #612)
+
+## 0.5.5 (2026-04-29)
+
+- Feat: Kimi K2.6 backend — `pip install 'graphifyy[kimi]'` + `MOONSHOT_API_KEY` routes semantic extraction through Kimi K2.6. 3-6x richer relation extraction at ~3x lower cost. Claude remains default; Kimi is opt-in.
+- Fix: phantom god nodes (#598) — member-call callees (`this.logger.log()` → `log`) no longer cross-file resolved. Go package-qualified calls (`pkg.Func()`) correctly preserved. Affects JS/TS, Go, Rust, Swift, Kotlin, Scala, PHP, C++, C#, Zig, Elixir.
+- Fix: `concept` file_type no longer triggers validation warnings (#601)
+- Fix: `graphify update` remembers scan root via `graphify-out/.graphify_root` — no path argument needed on subsequent runs
+- Fix: Kimi K2.6 temperature 400 error — temperature param is now skipped for Kimi backends (model enforces its own fixed value) (#610)
+- Fix: community labels deleted in Step 9 cleanup — `.graphify_labels.json` is now preserved so wiki/obsidian/HTML retain human-readable names after re-cluster (#608)
+- Fix: `NameError: name '_os' is not defined` in `graphify update` Kimi tip (#612)
+- Fix: `SyntaxWarning` in `__main__.py` for shell glob pattern with backslash escapes
+- Fix: Python upper bound removed — `requires-python = ">=3.10"` now supports Python 3.14+ (#607)
+
+## 0.5.4 (2026-04-28)
+
+- Fix: SSRF DNS rebinding — `safe_fetch` now patches `socket.getaddrinfo` for the full request duration (#591)
+- Fix: yt-dlp SSRF bypass — `download_audio` now calls `validate_url` before handing URL to yt-dlp (#592)
+
+## 0.5.3 (2026-04-27)
+
+- Fix: cache namespace — AST and semantic entries now live in `cache/ast/` and `cache/semantic/` subdirectories; flat entries read as migration fallback
+
+## 0.5.2 (2026-04-26)
+
+- Fix: PreToolUse hook now matches on `Bash` instead of `Glob|Grep` for Claude Code v2.1.117+
+
+## 0.5.1 (2026-04-25)
+
+- Fix: node ID collision for same-named files in different directories
+- Fix: `source_file` paths relativized before return so `graph.json` is portable
+- Fix: desync guard — `to_json()` returns bool; report only written on successful JSON write
+- Feat: TypeScript `@/` path aliases resolved via `tsconfig.json`
+- Feat: Show All / Hide All buttons in HTML community panel
+
+## 0.5.0 (2026-04-24)
+
+- Feat: `graphify clone <github-url>` — clone and graph any public repo
+- Feat: `graphify merge-graphs` — combine multiple `graph.json` outputs into one cross-repo graph
+- Feat: `CLAUDE_CONFIG_DIR` support in `graphify install`
+- Feat: shrink guard — `to_json()` refuses to overwrite with a smaller graph
+- Feat: `build_merge()` for safe incremental updates
+- Feat: duplicate node deduplication via `deduplicate_by_label()`
+- Fix: `graphify-out/` excluded from source scanning
+
 ## 0.4.23 (2026-04-18)
 
 - Fix: stale skill version warning persists after running `graphify install` when multiple platforms were previously installed — `graphify install` now refreshes `.graphify_version` in all other known skill directories so the warning clears across the board (#178)

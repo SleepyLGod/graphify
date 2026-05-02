@@ -2,16 +2,25 @@ name: CI
 
 on:
   push:
-    branches: ["v1", "v2", "v3", "v4", "main"]
+    branches: ["v1", "v2", "v3", "v4", "v5", "main"]
   pull_request:
-    branches: ["v1", "v2", "v3", "v4", "main"]
+    branches: ["v1", "v2", "v3", "v4", "v5", "main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -20,11 +29,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: 'pyproject.toml'
 
       - name: Install dependencies
         run: |
-          pip install -e ".[mcp,pdf,watch]"
-          pip install pytest
+          pip install -e ".[all,test]"
 
       - name: Run tests
         run: |

@@ -25,6 +25,22 @@ COMMUNITY_COLORS = [
 MAX_NODES_FOR_VIZ = 5_000
 
 
+def _viz_node_limit() -> int:
+    """Return the effective viz node limit, honoring GRAPHIFY_VIZ_NODE_LIMIT env var.
+
+    Falls back to MAX_NODES_FOR_VIZ when the env var is unset, empty, or non-integer.
+    Set to 0 to disable HTML viz unconditionally (useful for CI runners).
+    """
+    import os
+    raw = os.environ.get("GRAPHIFY_VIZ_NODE_LIMIT")
+    if raw is None or not raw.strip():
+        return MAX_NODES_FOR_VIZ
+    try:
+        return int(raw)
+    except ValueError:
+        return MAX_NODES_FOR_VIZ
+
+
 def _html_styles() -> str:
     return """<style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -55,6 +71,9 @@ def _html_styles() -> str:
   .legend-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .legend-count { color: #666; font-size: 11px; }
   #stats { padding: 10px 14px; border-top: 1px solid #2a2a4e; font-size: 11px; color: #555; }
+  #legend-controls { display: flex; gap: 6px; margin-bottom: 8px; }
+  #legend-controls button { flex: 1; background: #0f0f1a; border: 1px solid #3a3a5e; color: #aaa; padding: 4px 0; border-radius: 4px; font-size: 11px; cursor: pointer; }
+  #legend-controls button:hover { border-color: #4E79A7; color: #e0e0e0; }
 </style>"""
 
 
@@ -240,6 +259,18 @@ document.addEventListener('click', e => {{
 }});
 
 const hiddenCommunities = new Set();
+
+function toggleAllCommunities(hide) {{
+  document.querySelectorAll('.legend-item').forEach(item => {{
+    hide ? item.classList.add('dimmed') : item.classList.remove('dimmed');
+  }});
+  LEGEND.forEach(c => {{
+    if (hide) hiddenCommunities.add(c.cid); else hiddenCommunities.delete(c.cid);
+  }});
+  const updates = RAW_NODES.map(n => ({{ id: n.id, hidden: hide }}));
+  nodesDS.update(updates);
+}}
+
 const legendEl = document.getElementById('legend');
 LEGEND.forEach(c => {{
   const item = document.createElement('div');
@@ -279,7 +310,27 @@ def attach_hyperedges(G: nx.Graph, hyperedges: list) -> None:
     G.graph["hyperedges"] = existing
 
 
-def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str) -> None:
+def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False) -> bool:
+    # Safety check: refuse to silently shrink an existing graph (#479)
+    existing_path = Path(output_path)
+    if not force and existing_path.exists():
+        try:
+            existing_data = json.loads(existing_path.read_text(encoding="utf-8"))
+            existing_n = len(existing_data.get("nodes", []))
+            new_n = G.number_of_nodes()
+            if new_n < existing_n:
+                import sys as _sys
+                print(
+                    f"[graphify] WARNING: new graph has {new_n} nodes but existing "
+                    f"graph.json has {existing_n}. Refusing to overwrite — you may be "
+                    f"missing chunk files from a previous session. "
+                    f"Pass force=True to override.",
+                    file=_sys.stderr,
+                )
+                return False
+        except Exception:
+            pass  # unreadable existing file — proceed with write
+
     node_community = _node_community_map(communities)
     try:
         data = json_graph.node_link_data(G, edges="links")
@@ -292,9 +343,19 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str) ->
         if "confidence_score" not in link:
             conf = link.get("confidence", "EXTRACTED")
             link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
+        # Restore original edge direction. Undirected NetworkX storage may
+        # canonicalize endpoint order, flipping `calls` and other directional
+        # edges in graph.json. The build path stashes the true endpoints in
+        # _src/_tgt for exactly this purpose (#563).
+        true_src = link.pop("_src", None)
+        true_tgt = link.pop("_tgt", None)
+        if true_src is not None and true_tgt is not None:
+            link["source"] = true_src
+            link["target"] = true_tgt
     data["hyperedges"] = getattr(G, "graph", {}).get("hyperedges", [])
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:  # nosec
         json.dump(data, f, indent=2)
+    return True
 
 
 def prune_dangling_edges(graph_data: dict) -> tuple[dict, int]:
@@ -335,7 +396,7 @@ def to_cypher(G: nx.Graph, output_path: str) -> None:
             f"MATCH (a {{id: '{u_esc}'}}), (b {{id: '{v_esc}'}}) "
             f"MERGE (a)-[:{rel} {{confidence: '{conf}'}}]->(b);"
         )
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8") as f:  # nosec
         f.write("\n".join(lines))
 
 
@@ -350,15 +411,18 @@ def to_html(
 
     Features: node size by degree, click-to-inspect panel, search box,
     community filter, physics clustering by community, confidence-styled edges.
-    Raises ValueError if graph exceeds MAX_NODES_FOR_VIZ.
+    Raises ValueError if graph exceeds the effective viz node limit
+    (MAX_NODES_FOR_VIZ by default; overridable via GRAPHIFY_VIZ_NODE_LIMIT env var).
 
     If member_counts is provided (aggregated community view), node sizes are
     based on community member counts rather than graph degree.
     """
-    if G.number_of_nodes() > MAX_NODES_FOR_VIZ:
+    limit = _viz_node_limit()
+    if G.number_of_nodes() > limit:
         raise ValueError(
-            f"Graph has {G.number_of_nodes()} nodes - too large for HTML viz. "
-            f"Use --no-viz or reduce input size."
+            f"Graph has {G.number_of_nodes()} nodes - too large for HTML viz "
+            f"(limit: {limit}). Use --no-viz, raise GRAPHIFY_VIZ_NODE_LIMIT, "
+            f"or reduce input size."
         )
 
     node_community = _node_community_map(communities)
@@ -395,14 +459,19 @@ def to_html(
             "degree": deg,
         })
 
-    # Build edges list
+    # Build edges list. Restore original edge direction from _src/_tgt
+    # (stashed by build.py for exactly this reason): undirected NetworkX
+    # canonicalizes endpoint order, which would otherwise flip the arrow
+    # for `calls` and `rationale_for` in the rendered graph (#563).
     vis_edges = []
     for u, v, data in G.edges(data=True):
         confidence = data.get("confidence", "EXTRACTED")
         relation = data.get("relation", "")
+        true_src = data.get("_src", u)
+        true_tgt = data.get("_tgt", v)
         vis_edges.append({
-            "from": u,
-            "to": v,
+            "from": true_src,
+            "to": true_tgt,
             "label": relation,
             "title": _html.escape(f"{relation} [{confidence}]"),
             "dashes": confidence != "EXTRACTED",
@@ -451,6 +520,10 @@ def to_html(
   </div>
   <div id="legend-wrap">
     <h3>Communities</h3>
+    <div id="legend-controls">
+      <button onclick="toggleAllCommunities(false)">Show All</button>
+      <button onclick="toggleAllCommunities(true)">Hide All</button>
+    </div>
     <div id="legend"></div>
   </div>
   <div id="stats">{stats}</div>
@@ -460,7 +533,7 @@ def to_html(
 </body>
 </html>"""
 
-    Path(output_path).write_text(html, encoding="utf-8")
+    Path(output_path).write_text(html, encoding="utf-8")  # nosec
 
 
 # Keep backward-compatible alias - skill.md calls generate_html
@@ -575,7 +648,7 @@ def to_obsidian(
         lines.append(inline_tags)
 
         fname = node_filename[node_id] + ".md"
-        (out / fname).write_text("\n".join(lines), encoding="utf-8")
+        (out / fname).write_text("\n".join(lines), encoding="utf-8")  # nosec
 
     # Write one _COMMUNITY_name.md overview note per community
     # Build inter-community edge counts for "Connections to other communities"
@@ -692,7 +765,7 @@ def to_obsidian(
 
         community_safe = safe_name(community_name)
         fname = f"_COMMUNITY_{community_safe}.md"
-        (out / fname).write_text("\n".join(lines), encoding="utf-8")
+        (out / fname).write_text("\n".join(lines), encoding="utf-8")  # nosec
         community_notes_written += 1
 
     # Improvement 4: write .obsidian/graph.json to color nodes by community in graph view
@@ -707,7 +780,7 @@ def to_obsidian(
             for cid, label in sorted((community_labels or {}).items())
         ]
     }
-    (obsidian_dir / "graph.json").write_text(json.dumps(graph_config, indent=2), encoding="utf-8")
+    (obsidian_dir / "graph.json").write_text(json.dumps(graph_config, indent=2), encoding="utf-8")  # nosec
 
     return G.number_of_nodes() + community_notes_written
 
@@ -868,7 +941,7 @@ def to_canvas(
         })
 
     canvas_data = {"nodes": canvas_nodes, "edges": canvas_edges}
-    Path(output_path).write_text(json.dumps(canvas_data, indent=2), encoding="utf-8")
+    Path(output_path).write_text(json.dumps(canvas_data, indent=2), encoding="utf-8")  # nosec
 
 
 def push_to_neo4j(

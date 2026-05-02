@@ -1,4 +1,5 @@
 """Tests for graphify install --platform routing."""
+import json
 from pathlib import Path
 from unittest.mock import patch
 import pytest
@@ -127,6 +128,69 @@ def test_codex_agents_install_writes_agents_md(tmp_path):
     assert agents_md.exists()
     assert "graphify" in agents_md.read_text()
     assert "GRAPH_REPORT.md" in agents_md.read_text()
+
+
+def test_codex_agents_install_writes_user_prompt_submit_hook(tmp_path):
+    _agents_install(tmp_path, "codex")
+
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    hooks = json.loads(hooks_path.read_text())
+    command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+
+    assert "UserPromptSubmit" in hooks["hooks"]
+    assert "PreToolUse" not in hooks["hooks"]
+    assert "UserPromptSubmit" in command
+    assert "additionalContext" in command
+    assert "graphify-out/GRAPH_REPORT.md" in command
+
+
+def test_codex_agents_install_removes_only_graphify_generated_hooks(tmp_path):
+    from graphify.__main__ import _LEGACY_CODEX_PRE_TOOL_HOOK
+
+    unrelated_hook = {
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": "echo graphify for my own plugin",
+            }
+        ],
+    }
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    hooks_path.write_text(json.dumps({
+        "hooks": {
+            "PreToolUse": [
+                _LEGACY_CODEX_PRE_TOOL_HOOK,
+                unrelated_hook,
+            ]
+        }
+    }))
+
+    _agents_install(tmp_path, "codex")
+
+    hooks = json.loads(hooks_path.read_text())
+    pre_tool = hooks["hooks"].get("PreToolUse", [])
+    user_prompt = hooks["hooks"].get("UserPromptSubmit", [])
+
+    assert pre_tool == [unrelated_hook]
+    assert len(user_prompt) == 1
+    assert "graphify-out/GRAPH_REPORT.md" in user_prompt[0]["hooks"][0]["command"]
+
+
+def test_codex_agents_install_preserves_non_object_hooks_value(tmp_path):
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    hooks_path.write_text(json.dumps({
+        "hooks": ["recoverable user config"],
+        "other": {"keep": True},
+    }))
+
+    _agents_install(tmp_path, "codex")
+
+    hooks = json.loads(hooks_path.read_text())
+    assert hooks["hooks"] == ["recoverable user config"]
+    assert hooks["other"] == {"keep": True}
 
 
 def test_opencode_agents_install_writes_agents_md(tmp_path):

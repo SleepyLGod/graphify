@@ -249,7 +249,8 @@ Rules:
 
 Code files: focus on semantic edges AST cannot find (call relationships, shared data, arch patterns).
   Do not re-extract imports - AST already has those.
-Doc/paper files: extract named concepts, entities, citations. Also extract rationale — sections that explain WHY a decision was made, trade-offs chosen, or design intent. These become nodes with `rationale_for` edges pointing to the concept they explain.
+Doc/paper files: extract named concepts, entities, citations. For rationale (WHY decisions were made, trade-offs, design intent): store as a `rationale` attribute on the relevant concept node — do NOT create a separate rationale node or fragment node. Only create a node for something that is itself a named entity or concept.
+Code files: when adding `calls` edges, source MUST be the caller (the function/class doing the calling), target MUST be the callee. Never reverse this direction.
 Image files: use vision to understand what the image IS - do not just OCR.
   UI screenshot: layout patterns, design decisions, key elements, purpose.
   Chart: metric, trend/insight, data source.
@@ -278,10 +279,16 @@ If a file has YAML frontmatter (--- ... ---), copy source_url, captured_at, auth
 
 confidence_score is REQUIRED on every edge - never omit it, never use 0.5 as a default:
 - EXTRACTED edges: confidence_score = 1.0 always
-- INFERRED edges: reason about each edge individually.
-  Direct structural evidence (shared data structure, clear dependency): 0.8-0.9.
-  Reasonable inference with some uncertainty: 0.6-0.7.
-  Weak or speculative: 0.4-0.5. Most edges should be 0.6-0.9, not 0.5.
+- INFERRED edges: pick exactly ONE value from this set — never 0.5:
+    0.95  direct structural evidence (shared data structure, named cross-file reference).
+    0.85  strong inference (clear functional alignment, no direct symbol link).
+    0.75  reasonable inference (shared problem domain + similar shape, requires interpretation).
+    0.65  weak inference (thematically related, no shape evidence).
+    0.55  speculative but plausible (surface-level co-occurrence only).
+  Models follow discrete rubrics better than continuous ranges; the bimodal
+  distribution observed in production (>50% at 0.5, >40% at 0.85+) shows the
+  range guidance is being collapsed to a binary. If no value above fits, mark
+  the edge AMBIGUOUS rather than picking 0.4 or below.
 - AMBIGUOUS edges: 0.1-0.3
 
 Output exactly this JSON (no other text):
