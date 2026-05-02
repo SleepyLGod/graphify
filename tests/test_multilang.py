@@ -1,9 +1,9 @@
-"""Tests for multi-language AST extraction: JS/TS, Go, Rust."""
+"""Tests for multi-language AST extraction: JS/TS, Go, Rust, SQL."""
 from __future__ import annotations
 import shutil
 from pathlib import Path
 import pytest
-from graphify.extract import extract_js, extract_go, extract_rust, extract
+from graphify.extract import extract_js, extract_go, extract_rust, extract, extract_sql
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -22,6 +22,17 @@ def _call_pairs(result):
 
 def _confidences(result):
     return {e["confidence"] for e in result["edges"]}
+
+
+def _extract_sql_or_skip():
+    result = extract_sql(FIXTURES / "sample.sql")
+    if result.get("error"):
+        pytest.skip(result["error"])
+    return result
+
+
+def _edges_with_relation(result, *relations):
+    return [e for e in result["edges"] if e["relation"] in relations]
 
 
 # ── TypeScript ────────────────────────────────────────────────────────────────
@@ -52,6 +63,20 @@ def test_ts_calls_are_extracted():
     for e in r["edges"]:
         if e["relation"] == "calls":
             assert e["confidence"] == "EXTRACTED"
+
+
+def test_ts_import_edges_have_import_context():
+    r = extract_js(FIXTURES / "sample.ts")
+    import_edges = _edges_with_relation(r, "imports", "imports_from")
+    assert import_edges
+    assert all(e.get("context") == "import" for e in import_edges)
+
+
+def test_ts_call_edges_have_call_context():
+    r = extract_js(FIXTURES / "sample.ts")
+    call_edges = _edges_with_relation(r, "calls")
+    assert call_edges
+    assert all(e.get("context") == "call" for e in call_edges)
 
 def test_ts_no_dangling_edges():
     r = extract_js(FIXTURES / "sample.ts")
@@ -86,6 +111,20 @@ def test_go_emits_calls():
 def test_go_has_extracted_calls():
     r = extract_go(FIXTURES / "sample.go")
     assert "EXTRACTED" in _confidences(r)
+
+
+def test_go_import_edges_have_import_context():
+    r = extract_go(FIXTURES / "sample.go")
+    import_edges = _edges_with_relation(r, "imports", "imports_from")
+    assert import_edges
+    assert all(e.get("context") == "import" for e in import_edges)
+
+
+def test_go_call_edges_have_call_context():
+    r = extract_go(FIXTURES / "sample.go")
+    call_edges = _edges_with_relation(r, "calls")
+    assert call_edges
+    assert all(e.get("context") == "call" for e in call_edges)
 
 def test_go_no_dangling_edges():
     r = extract_go(FIXTURES / "sample.go")
@@ -122,6 +161,20 @@ def test_rust_calls_are_extracted():
     for e in r["edges"]:
         if e["relation"] == "calls":
             assert e["confidence"] == "EXTRACTED"
+
+
+def test_rust_import_edges_have_import_context():
+    r = extract_rust(FIXTURES / "sample.rs")
+    import_edges = _edges_with_relation(r, "imports", "imports_from")
+    assert import_edges
+    assert all(e.get("context") == "import" for e in import_edges)
+
+
+def test_rust_call_edges_have_call_context():
+    r = extract_rust(FIXTURES / "sample.rs")
+    call_edges = _edges_with_relation(r, "calls")
+    assert call_edges
+    assert all(e.get("context") == "call" for e in call_edges)
 
 def test_rust_no_dangling_edges():
     r = extract_rust(FIXTURES / "sample.rs")
@@ -171,3 +224,38 @@ def test_cache_miss_after_file_change(tmp_path):
     # bar() should appear in the second result
     labels2 = [n["label"] for n in r2["nodes"]]
     assert any("bar" in l for l in labels2)
+
+
+# ── SQL ───────────────────────────────────────────────────────────────────────
+
+def test_sql_finds_tables():
+    r = _extract_sql_or_skip()
+    labels = [n["label"] for n in r["nodes"]]
+    assert any("users" in l for l in labels)
+    assert any("organizations" in l for l in labels)
+
+def test_sql_finds_view():
+    r = _extract_sql_or_skip()
+    labels = [n["label"] for n in r["nodes"]]
+    assert any("active_users" in l for l in labels)
+
+def test_sql_finds_function():
+    r = _extract_sql_or_skip()
+    labels = [n["label"] for n in r["nodes"]]
+    assert any("get_user" in l for l in labels)
+
+def test_sql_emits_foreign_key_edge():
+    r = _extract_sql_or_skip()
+    relations = {e["relation"] for e in r["edges"]}
+    assert "references" in relations
+
+def test_sql_emits_reads_from_edge():
+    r = _extract_sql_or_skip()
+    relations = {e["relation"] for e in r["edges"]}
+    assert "reads_from" in relations
+
+def test_sql_no_dangling_edges():
+    r = _extract_sql_or_skip()
+    node_ids = {n["id"] for n in r["nodes"]}
+    for e in r["edges"]:
+        assert e["source"] in node_ids, f"dangling source: {e['source']}"

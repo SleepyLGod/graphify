@@ -221,5 +221,5 @@ def _is_graphify_ignored(kb_root: Path, path: Path, scope: str) -> bool:
         path.relative_to(raw_root)
     except ValueError:
         return False
-    patterns = _load_graphifyignore(raw_root)
-    return _is_ignored(path, raw_root, patterns)
+    patterns = _load_graphifyignore(kb_root)
+    return _is_ignored(path, kb_root, patterns)

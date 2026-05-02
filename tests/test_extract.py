@@ -124,6 +124,13 @@ def test_calls_edges_are_extracted():
             assert edge["weight"] == 1.0
 
 
+def test_python_call_edges_have_call_context():
+    result = extract_python(FIXTURES / "sample_calls.py")
+    call_edges = [e for e in result["edges"] if e["relation"] == "calls"]
+    assert call_edges
+    assert all(e.get("context") == "call" for e in call_edges)
+
+
 def test_calls_no_self_loops():
     result = extract_python(FIXTURES / "sample_calls.py")
     for edge in result["edges"]:
@@ -168,3 +175,25 @@ def test_calls_deduplication():
     result = extract_python(FIXTURES / "sample_calls.py")
     call_pairs = [(e["source"], e["target"]) for e in result["edges"] if e["relation"] == "calls"]
     assert len(call_pairs) == len(set(call_pairs)), "Duplicate calls edges found"
+
+
+def test_cross_file_calls_skip_ambiguous_duplicate_labels(tmp_path):
+    """Unqualified cross-file calls must not guess between duplicate helper names."""
+    caller = tmp_path / "caller.py"
+    helper_a = tmp_path / "a.py"
+    helper_b = tmp_path / "b.py"
+    caller.write_text("def run():\n    log()\n")
+    helper_a.write_text("def log():\n    return 'a'\n")
+    helper_b.write_text("def log():\n    return 'b'\n")
+
+    result = extract([caller, helper_a, helper_b], cache_root=tmp_path)
+    nodes = {n["id"]: n for n in result["nodes"]}
+    calls = [
+        e for e in result["edges"]
+        if e["relation"] == "calls" and e["confidence"] == "INFERRED"
+    ]
+
+    assert not any(
+        nodes[e["source"]]["label"] == "run()" and nodes[e["target"]]["label"] == "log()"
+        for e in calls
+    )

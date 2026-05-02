@@ -18,7 +18,7 @@ class FileType(str, Enum):
 
 _MANIFEST_PATH = "graphify-out/manifest.json"
 
-CODE_EXTENSIONS = {'.py', '.ts', '.js', '.jsx', '.tsx', '.mjs', '.ejs', '.go', '.rs', '.java', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.rb', '.swift', '.kt', '.kts', '.cs', '.scala', '.php', '.lua', '.toc', '.zig', '.ps1', '.ex', '.exs', '.m', '.mm', '.jl', '.vue', '.svelte', '.dart', '.v', '.sv'}
+CODE_EXTENSIONS = {'.py', '.ts', '.js', '.jsx', '.tsx', '.mjs', '.ejs', '.go', '.rs', '.java', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.rb', '.swift', '.kt', '.kts', '.cs', '.scala', '.php', '.lua', '.toc', '.zig', '.ps1', '.ex', '.exs', '.m', '.mm', '.jl', '.vue', '.svelte', '.dart', '.v', '.sv', '.sql', '.r'}
 DOC_EXTENSIONS = {'.md', '.mdx', '.txt', '.rst', '.html', '.yaml', '.yml'}
 PAPER_EXTENSIONS = {'.pdf'}
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'}
@@ -78,11 +78,42 @@ def _looks_like_paper(path: Path) -> bool:
 _ASSET_DIR_MARKERS = {".imageset", ".xcassets", ".appiconset", ".colorset", ".launchimage"}
 
 
+_SHEBANG_CODE_INTERPRETERS = {
+    "python", "python3", "python2",
+    "ruby", "perl", "node", "nodejs",
+    "bash", "sh", "dash", "zsh", "fish", "ksh", "tcsh",
+    "lua", "php", "julia", "Rscript",
+}
+
+
+def _shebang_file_type(path: Path) -> FileType | None:
+    """Peek at the first line of an extensionless file for a shebang."""
+    try:
+        with path.open("rb") as f:
+            first = f.read(128)
+        if not first.startswith(b"#!"):
+            return None
+        line = first.split(b"\n")[0].decode(errors="replace")
+        parts = line[2:].strip().split()
+        if not parts:
+            return None
+        interp = parts[0].split("/")[-1]  # /usr/bin/env → env
+        if interp == "env" and len(parts) > 1:
+            interp = parts[1].split("/")[-1]
+        if interp in _SHEBANG_CODE_INTERPRETERS:
+            return FileType.CODE
+    except OSError:
+        pass
+    return None
+
+
 def classify_file(path: Path) -> FileType | None:
     # Compound extensions must be checked before simple suffix lookup
     if path.name.lower().endswith(".blade.php"):
         return FileType.CODE
     ext = path.suffix.lower()
+    if not ext:
+        return _shebang_file_type(path)
     if ext in CODE_EXTENSIONS:
         return FileType.CODE
     if ext in PAPER_EXTENSIONS:
@@ -169,7 +200,6 @@ def xlsx_to_markdown(path: Path) -> str:
             ws = wb[sheet_name]
             rows = []
             for row in ws.iter_rows(values_only=True):
-                # Skip entirely empty rows
                 if all(cell is None for cell in row):
                     continue
                 rows.append([str(cell) if cell is not None else "" for cell in row])
@@ -188,6 +218,91 @@ def xlsx_to_markdown(path: Path) -> str:
         return ""
     except Exception:
         return ""
+
+
+def xlsx_extract_structure(path: Path) -> dict:
+    """Extract structural nodes (sheets, named tables, column headers) from an .xlsx file.
+
+    Returns a nodes/edges dict compatible with the graphify extract pipeline.
+    Used in addition to xlsx_to_markdown so Claude sees both structure and content.
+    """
+    def _nid(*parts: str) -> str:
+        return re.sub(r"[^a-z0-9_]", "_", "_".join(p.lower() for p in parts).strip("_"))
+
+    try:
+        import openpyxl
+    except ImportError:
+        return {"nodes": [], "edges": []}
+
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=False, data_only=True)
+    except Exception:
+        return {"nodes": [], "edges": []}
+
+    stem = _re.sub(r"[^a-z0-9]", "_", path.stem.lower())
+    str_path = str(path)
+    file_nid = _nid(str_path)
+    nodes: list[dict] = [{"id": file_nid, "label": path.name, "file_type": "document",
+                           "source_file": str_path, "source_location": None}]
+    edges: list[dict] = []
+    seen: set[str] = {file_nid}
+
+    def _add(nid: str, label: str) -> None:
+        if nid not in seen:
+            seen.add(nid)
+            nodes.append({"id": nid, "label": label, "file_type": "document",
+                           "source_file": str_path, "source_location": None})
+
+    def _edge(src: str, tgt: str, relation: str) -> None:
+        edges.append({"source": src, "target": tgt, "relation": relation,
+                       "confidence": "EXTRACTED", "source_file": str_path,
+                       "source_location": None, "weight": 1.0})
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        sheet_nid = _nid(stem, sheet_name)
+        _add(sheet_nid, f"{sheet_name} (sheet)")
+        _edge(file_nid, sheet_nid, "contains")
+
+        # Named Excel Tables (ListObjects)
+        if hasattr(ws, "tables"):
+            for tbl in ws.tables.values():
+                tbl_nid = _nid(stem, sheet_name, tbl.name)
+                _add(tbl_nid, tbl.name)
+                _edge(sheet_nid, tbl_nid, "contains")
+                # Column headers from table header row
+                ref = tbl.ref  # e.g. "A1:D10"
+                if ref:
+                    try:
+                        from openpyxl.utils import range_boundaries
+                        min_col, min_row, max_col, _ = range_boundaries(ref)
+                        header_row = list(ws.iter_rows(min_row=min_row, max_row=min_row,
+                                                       min_col=min_col, max_col=max_col,
+                                                       values_only=True))
+                        if header_row:
+                            for col_name in header_row[0]:
+                                if col_name:
+                                    col_nid = _nid(stem, tbl.name, str(col_name))
+                                    _add(col_nid, str(col_name))
+                                    _edge(tbl_nid, col_nid, "contains")
+                    except Exception:
+                        pass
+        else:
+            # Fallback: first non-empty row as column headers
+            for row in ws.iter_rows(max_row=1, values_only=True):
+                for cell in row:
+                    if cell:
+                        col_nid = _nid(stem, sheet_name, str(cell))
+                        _add(col_nid, str(cell))
+                        _edge(sheet_nid, col_nid, "contains")
+                break
+
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    return {"nodes": nodes, "edges": edges}
 
 
 def convert_office_file(path: Path, out_dir: Path) -> Path | None:
@@ -263,48 +378,78 @@ def _is_noise_dir(part: str) -> bool:
     return False
 
 
-def _load_pattern_file(root: Path, filename: str) -> list[tuple[Path, str]]:
-    """Read a Graphify pattern file from root **and ancestor directories**.
+_VCS_MARKERS = (".git", ".hg", ".svn", "_darcs", ".fossil")
 
-    Returns a list of (anchor_dir, pattern) pairs. Each pattern is matched
-    against paths relative to both the scan root and the anchor_dir where
-    the pattern file was found — so patterns written relative to a parent
-    directory still work when graphify is run on a subfolder.
+def _parse_gitignore_line(raw: str) -> str:
+    """Parse one raw line from a .graphifyignore file per gitignore spec.
 
-    Walks upward from *root* towards the filesystem root, stopping at a
-    ``.git`` boundary. Lines starting with # are comments; blank lines ignored.
+    - Strip newline chars
+    - Strip inline comments (whitespace + # suffix), but only when # is
+      preceded by whitespace — so path#with#hash.py is preserved
+    - Unescape \\# to literal #
+    - Remove trailing spaces unless escaped with backslash
+    - Strip leading whitespace
+    - Return empty string for blank lines and full-line comments
     """
-    patterns: list[tuple[Path, str]] = []
-    current = root.resolve()
+    line = raw.rstrip("\n\r")
+    line = line.lstrip()
+    if not line or line.startswith("#"):
+        return ""
+    # Strip inline comments: require whitespace before # (gitignore extension)
+    line = re.sub(r"\s+#+[^\\].*$", "", line)
+    # Unescape \# → literal #
+    line = line.replace("\\#", "#")
+    # Remove unescaped trailing spaces (per gitignore spec)
+    line = re.sub(r"(?<!\\) +$", "", line)
+    return line
+
+
+def _find_vcs_root(start: Path) -> Path | None:
+    """Walk upward from start; return the first directory containing a VCS marker."""
+    current = start.resolve()
+    home = Path.home()
     while True:
-        pattern_file = current / filename
-        if pattern_file.exists():
-            for line in pattern_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    patterns.append((current, line))
-        # Stop climbing once we've processed the git repo root
-        if (current / ".git").exists():
-            break
+        if any((current / m).exists() for m in _VCS_MARKERS):
+            return current
         parent = current.parent
-        if parent == current:
-            break  # filesystem root
+        if parent == current or current == home:
+            return None
         current = parent
+
+
+def _load_pattern_file(root: Path, filename: str) -> list[tuple[Path, str]]:
+    """Read Graphify pattern files from root and ancestors until the VCS root."""
+    root = root.resolve()
+    ceiling = _find_vcs_root(root) or root
+
+    # Collect ancestor dirs from ceiling down to root (outer → inner)
+    dirs: list[Path] = []
+    current = root
+    while True:
+        dirs.append(current)
+        if current == ceiling:
+            break
+        current = current.parent
+    dirs.reverse()  # ceiling first, scan root last
+
+    patterns: list[tuple[Path, str]] = []
+    for d in dirs:
+        pattern_file = d / filename
+        if pattern_file.exists():
+            for raw in pattern_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = _parse_gitignore_line(raw)
+                if line:
+                    patterns.append((d, line))
     return patterns
 
 
 def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
-    """Read .graphifyignore patterns from root and ancestor directories."""
+    """Read .graphifyignore patterns from root and ancestors."""
     return _load_pattern_file(root, ".graphifyignore")
 
 
 def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
-    """Read .graphifyinclude allowlist patterns from root and ancestors.
-
-    Include patterns are intentionally narrow: they only opt matching files and
-    the directories needed to reach them into hidden-path traversal. Sensitive
-    files and hard-skipped noise directories are still excluded later.
-    """
+    """Read .graphifyinclude allowlist patterns from root and ancestors."""
     return _load_pattern_file(root, ".graphifyinclude")
 
 
@@ -328,42 +473,57 @@ def _pattern_matches(path: Path, rel: str, pattern: str) -> bool:
     return False
 
 
-def _matches_patterns(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
-    """Return True if path matches any pattern loaded for root/ancestors."""
-    if not patterns:
+def _match_pattern(path: Path, root: Path, anchor: Path, pattern: str) -> bool:
+    """Return True when path matches one anchored or unanchored pattern."""
+    anchored = pattern.startswith("/")
+    p = pattern.strip("/")
+    if not p:
         return False
 
-    for anchor, pattern in patterns:
-        p = pattern.strip("/")
-        if not p:
-            continue
-        # Try path relative to the scan root
+    if anchored:
         try:
-            rel = str(path.relative_to(root)).replace(os.sep, "/")
-            if _pattern_matches(path, rel, p):
-                return True
+            rel_anchor = str(path.relative_to(anchor)).replace(os.sep, "/")
+        except ValueError:
+            return False
+        return _pattern_matches(path, rel_anchor, p)
+
+    try:
+        rel = str(path.relative_to(root)).replace(os.sep, "/")
+        if _pattern_matches(path, rel, p):
+            return True
+    except ValueError:
+        pass
+    if anchor != root:
+        try:
+            rel_anchor = str(path.relative_to(anchor)).replace(os.sep, "/")
+            return _pattern_matches(path, rel_anchor, p)
         except ValueError:
             pass
-        # Also try relative to the anchor dir (the pattern file's location),
-        # so parent-level patterns still fire when running on a subfolder.
-        if anchor != root:
-            try:
-                rel_anchor = str(path.relative_to(anchor)).replace(os.sep, "/")
-                if _pattern_matches(path, rel_anchor, p):
-                    return True
-            except ValueError:
-                pass
     return False
 
 
 def _is_ignored(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
-    """Return True if path matches any .graphifyignore pattern."""
-    return _matches_patterns(path, root, patterns)
+    """Return True if the path is ignored by .graphifyignore patterns."""
+    if not patterns:
+        return False
+
+    result = False
+    for anchor, pattern in patterns:
+        negated = pattern.startswith("!")
+        raw = pattern[1:] if negated else pattern
+        if _match_pattern(path, root, anchor, raw):
+            result = not negated  # last match wins; ! flips to un-ignore
+    return result
 
 
 def _is_included(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
     """Return True if path matches any .graphifyinclude allowlist pattern."""
-    return _matches_patterns(path, root, patterns)
+    if not patterns:
+        return False
+    for anchor, pattern in patterns:
+        if _match_pattern(path, root, anchor, pattern):
+            return True
+    return False
 
 
 def _could_contain_included_path(path: Path, root: Path, patterns: list[tuple[Path, str]]) -> bool:
@@ -393,7 +553,7 @@ def _could_contain_included_path(path: Path, root: Path, patterns: list[tuple[Pa
                 continue
             if p == rel or p.startswith(rel + "/"):
                 return True
-            if _pattern_matches(path, rel, p):
+            if fnmatch.fnmatch(rel, p):
                 return True
     return False
 

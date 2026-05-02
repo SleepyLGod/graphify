@@ -130,18 +130,17 @@ def test_codex_agents_install_writes_agents_md(tmp_path):
     assert "GRAPH_REPORT.md" in agents_md.read_text()
 
 
-def test_codex_agents_install_writes_user_prompt_submit_hook(tmp_path):
+def test_codex_agents_install_writes_pre_tool_hook(tmp_path):
     _agents_install(tmp_path, "codex")
 
     hooks_path = tmp_path / ".codex" / "hooks.json"
     hooks = json.loads(hooks_path.read_text())
-    command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    command = hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
 
-    assert "UserPromptSubmit" in hooks["hooks"]
-    assert "PreToolUse" not in hooks["hooks"]
-    assert "UserPromptSubmit" in command
-    assert "additionalContext" in command
-    assert "graphify-out/GRAPH_REPORT.md" in command
+    assert "PreToolUse" in hooks["hooks"]
+    assert "UserPromptSubmit" not in hooks["hooks"]
+    assert command.endswith("graphify hook-check")
+    assert "additionalContext" not in command
 
 
 def test_codex_agents_install_removes_only_graphify_generated_hooks(tmp_path):
@@ -173,9 +172,9 @@ def test_codex_agents_install_removes_only_graphify_generated_hooks(tmp_path):
     pre_tool = hooks["hooks"].get("PreToolUse", [])
     user_prompt = hooks["hooks"].get("UserPromptSubmit", [])
 
-    assert pre_tool == [unrelated_hook]
-    assert len(user_prompt) == 1
-    assert "graphify-out/GRAPH_REPORT.md" in user_prompt[0]["hooks"][0]["command"]
+    assert pre_tool[0] == unrelated_hook
+    assert pre_tool[1]["hooks"][0]["command"].endswith("graphify hook-check")
+    assert user_prompt == []
 
 
 def test_codex_agents_install_preserves_non_object_hooks_value(tmp_path):
